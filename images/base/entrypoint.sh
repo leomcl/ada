@@ -1,10 +1,54 @@
 #!/usr/bin/env sh
 set -eu
 
+export PATH="/root/.local/bin:/root/.opencode/bin:$PATH"
 export ADA_GATEWAY="${ADA_GATEWAY:-http://ada-gateway.ada-system.svc:8080}"
 gateway="${ADA_GATEWAY%/}"
 workspace="${WORKSPACE:-/workspace}"
 access="${ACCESS:-tty}"
+harness="${HARNESS:-}"
+
+install_harness() {
+	case "$1" in
+		""|none)
+			;;
+		opencode)
+			command -v opencode >/dev/null 2>&1 || curl -fsSL https://opencode.ai/install | bash
+			;;
+		claude)
+			command -v claude >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash
+			;;
+		agy)
+			command -v agy >/dev/null 2>&1 || curl -fsSL https://antigravity.google/cli/install.sh | bash
+			;;
+		*)
+			echo "entrypoint: unknown HARNESS '$1' (expected opencode, claude, agy, or none)" >&2
+			exit 1
+			;;
+	esac
+}
+
+install_rex() {
+	command -v rex >/dev/null 2>&1 || curl -fsSL "${REX_INSTALL_URL:-https://pkgs.superlogical.com/rex/install.sh}" | sh
+}
+
+install_tailscale() {
+	command -v tailscaled >/dev/null 2>&1 || curl -fsSL https://tailscale.com/install.sh | sh
+}
+
+install_harness "$harness"
+
+if [ "$access" = "rex" ] || [ "${WITH_REX:-false}" = "true" ]; then
+	install_rex
+fi
+
+if [ "${WITH_TAILSCALE:-false}" = "true" ] || { [ -n "${TS_AUTHKEY:-}" ] && [ "$access" != "rex" ]; }; then
+	install_tailscale
+fi
+
+if [ "${1:-}" = "--install-only" ]; then
+	exit 0
+fi
 
 if [ -n "${ADA_TOKEN:-}" ]; then
 	export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$gateway/v1}"
@@ -21,7 +65,7 @@ if [ "$gateway" != "http://ada-gateway.ada-system.svc:8080" ]; then
 	git config --global url."$gateway/github/".insteadOf "https://github.com/"
 fi
 
-if [ -n "${TS_AUTHKEY:-}" ]; then
+if [ -n "${TS_AUTHKEY:-}" ] && command -v tailscaled >/dev/null 2>&1; then
 	mkdir -p /tmp/tailscale
 	tailscaled \
 		--tun=userspace-networking \
@@ -47,6 +91,16 @@ case "$access" in
 	rex)
 		if [ -S /tmp/tailscale/tailscaled.sock ]; then
 			exec rex server run --tailscaled-socket=/tmp/tailscale/tailscaled.sock --extra-listen=tailnet
+		fi
+		if [ -n "${TS_AUTHKEY:-}" ]; then
+			mkdir -p /tmp/tailscale
+			printf '%s' "$TS_AUTHKEY" >/tmp/tailscale/authkey
+			chmod 600 /tmp/tailscale/authkey
+			exec rex server run \
+				--tailscale \
+				--tailscale-hostname="${ADA_SANDBOX_NAME:-$(hostname)}" \
+				--tailscale-auth-key-file=/tmp/tailscale/authkey \
+				--tailscale-advertise-tag="${TS_TAGS:-tag:ada}"
 		fi
 		exec rex server run
 		;;

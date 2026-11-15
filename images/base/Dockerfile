@@ -1,11 +1,11 @@
-FROM tailscale/tailscale:stable AS tailscale
+FROM debian:bookworm-slim
 
-FROM node:22-bookworm-slim
-
-ARG AGY_INSTALL_URL="https://antigravity.google/cli/install.sh"
-ARG REX_INSTALL_URL="https://pkgs.superlogical.com/rex/install.sh"
+ARG HARNESS=""
+ARG WITH_REX="false"
+ARG WITH_TAILSCALE="false"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+	bash \
 	ca-certificates \
 	curl \
 	git \
@@ -14,23 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	openssh-client \
 	procps \
 	ripgrep \
+	tar \
+	unzip \
 	&& rm -rf /var/lib/apt/lists/*
 
-COPY --from=tailscale /usr/local/bin/tailscale /usr/local/bin/tailscaled /usr/local/bin/
-
-RUN npm install -g opencode-ai @anthropic-ai/claude-code \
-	&& npm cache clean --force
-
-RUN if [ -n "$AGY_INSTALL_URL" ]; then \
-		curl -fsSL "$AGY_INSTALL_URL" | bash && \
-		if [ -x /root/.local/bin/agy ]; then mv /root/.local/bin/agy /usr/local/bin/agy; fi; \
-	fi
-
-RUN if [ -n "$REX_INSTALL_URL" ]; then \
-		curl -fsSL "$REX_INSTALL_URL" | sh; \
-	fi
-
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+ENV PATH="/root/.local/bin:/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
 	DISABLE_AUTOUPDATER=1 \
 	ADA_GATEWAY=http://ada-gateway.ada-system.svc:8080 \
 	OPENAI_BASE_URL=http://ada-gateway.ada-system.svc:8080/v1 \
@@ -43,7 +32,8 @@ COPY ada-pr /usr/local/bin/ada-pr
 COPY entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /usr/local/bin/ada-pr /entrypoint.sh \
-	&& mkdir -p /workspace
+	&& mkdir -p /workspace \
+	&& HARNESS="$HARNESS" WITH_REX="$WITH_REX" WITH_TAILSCALE="$WITH_TAILSCALE" /entrypoint.sh --install-only
 
 WORKDIR /workspace
 ENTRYPOINT ["/entrypoint.sh"]
