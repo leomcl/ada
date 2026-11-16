@@ -50,14 +50,15 @@ if [ "${1:-}" = "--install-only" ]; then
 	exit 0
 fi
 
+export OPENAI_BASE_URL="$gateway/v1"
+export ANTHROPIC_BASE_URL="$gateway/anthropic"
+export GEMINI_API_BASE_URL="$gateway/google"
+export GOOGLE_GEMINI_BASE_URL="$gateway/google"
+
 if [ -n "${ADA_TOKEN:-}" ]; then
-	export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$gateway/v1}"
 	export OPENAI_API_KEY="${OPENAI_API_KEY:-$ADA_TOKEN}"
-	export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-$gateway/anthropic}"
 	export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$ADA_TOKEN}"
 	export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$ADA_TOKEN}"
-	export GEMINI_API_BASE_URL="${GEMINI_API_BASE_URL:-$gateway/google}"
-	export GOOGLE_GEMINI_BASE_URL="${GOOGLE_GEMINI_BASE_URL:-$gateway/google}"
 	export GEMINI_API_KEY="${GEMINI_API_KEY:-$ADA_TOKEN}"
 fi
 
