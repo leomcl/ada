@@ -1,0 +1,9 @@
+[user]
+	name = Ada
+	email = ada@localhost
+[init]
+	defaultBranch = main
+[url "http://ada-gateway.ada-system.svc:8080/github/"]
+	insteadOf = https://github.com/
+[credential]
+	helper = "!f() { echo username=x-access-token; echo password=$ADA_TOKEN; }; f"

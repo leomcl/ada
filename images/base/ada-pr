@@ -1,0 +1,91 @@
+#!/usr/bin/env sh
+set -eu
+
+usage() {
+	echo "usage: ada-pr <title> [body] [--base <branch>] [--head <branch>]" >&2
+	exit 2
+}
+
+title=""
+body=""
+base="main"
+head=""
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--title|-t)
+			[ $# -ge 2 ] || usage
+			title="$2"
+			shift 2
+			;;
+		--body|-b)
+			[ $# -ge 2 ] || usage
+			body="$2"
+			shift 2
+			;;
+		--base|-B)
+			[ $# -ge 2 ] || usage
+			base="$2"
+			shift 2
+			;;
+		--head|-H)
+			[ $# -ge 2 ] || usage
+			head="$2"
+			shift 2
+			;;
+		--help|-h)
+			usage
+			;;
+		--*)
+			usage
+			;;
+		*)
+			if [ -z "$title" ]; then
+				title="$1"
+			elif [ -z "$body" ]; then
+				body="$1"
+			else
+				usage
+			fi
+			shift
+			;;
+	esac
+done
+
+[ -n "$title" ] || usage
+
+if [ -z "${ADA_TOKEN:-}" ]; then
+	echo "ada-pr: ADA_TOKEN is required" >&2
+	exit 1
+fi
+
+if [ -z "${ADA_REPO:-}" ]; then
+	echo "ada-pr: ADA_REPO is required (owner/repo)" >&2
+	exit 1
+fi
+
+if [ -z "$head" ]; then
+	head="$(git rev-parse --abbrev-ref HEAD)"
+fi
+
+case "$head" in
+	""|HEAD|main|master)
+		echo "ada-pr: refusing to open PR from branch '$head'" >&2
+		exit 1
+		;;
+esac
+
+gateway="${ADA_GATEWAY:-http://ada-gateway.ada-system.svc:8080}"
+payload="$(jq -n \
+	--arg title "$title" \
+	--arg body "$body" \
+	--arg head "$head" \
+	--arg base "$base" \
+	'{title: $title, body: $body, head: $head, base: $base}')"
+
+curl -fsSL -X POST \
+	-H "Authorization: Bearer $ADA_TOKEN" \
+	-H "Accept: application/vnd.github+json" \
+	-H "Content-Type: application/json" \
+	"${gateway%/}/github-api/repos/$ADA_REPO/pulls" \
+	-d "$payload" | jq -r '.html_url // .'
