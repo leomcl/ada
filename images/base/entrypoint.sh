@@ -62,7 +62,8 @@ if [ -n "${ADA_TOKEN:-}" ]; then
 fi
 
 if [ "$gateway" != "http://ada-gateway.ada-system.svc:8080" ]; then
-	git config --global url."$gateway/github/".insteadOf "https://github.com/"
+	git config --system --remove-section "url.http://ada-gateway.ada-system.svc:8080/github/" 2>/dev/null || true
+	git config --system url."$gateway/github/".insteadOf "https://github.com/"
 fi
 
 if [ -n "${TS_AUTHKEY:-}" ] && command -v tailscaled >/dev/null 2>&1; then
