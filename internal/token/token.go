@@ -1,6 +1,7 @@
 package token
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -21,6 +22,14 @@ type SandboxTokenClaims struct {
 type jwtHeader struct {
 	Alg string `json:"alg"`
 	Typ string `json:"typ"`
+}
+
+func ParseSigningKey(raw []byte) ([]byte, error) {
+	key := bytes.TrimSpace(raw)
+	if len(key) == 0 {
+		return nil, errors.New("signing key must not be empty")
+	}
+	return key, nil
 }
 
 func MintSandboxToken(claims SandboxTokenClaims, signingKey []byte) (string, error) {

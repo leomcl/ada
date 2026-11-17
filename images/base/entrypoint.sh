@@ -50,18 +50,6 @@ if [ "${1:-}" = "--install-only" ]; then
 	exit 0
 fi
 
-export OPENAI_BASE_URL="$gateway/v1"
-export ANTHROPIC_BASE_URL="$gateway/anthropic"
-export GEMINI_API_BASE_URL="$gateway/google"
-export GOOGLE_GEMINI_BASE_URL="$gateway/google"
-
-if [ -n "${ADA_TOKEN:-}" ]; then
-	export OPENAI_API_KEY="${OPENAI_API_KEY:-$ADA_TOKEN}"
-	export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$ADA_TOKEN}"
-	export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$ADA_TOKEN}"
-	export GEMINI_API_KEY="${GEMINI_API_KEY:-$ADA_TOKEN}"
-fi
-
 if [ "$gateway" != "http://ada-gateway.ada-system.svc:8080" ]; then
 	git config --system --remove-section "url.http://ada-gateway.ada-system.svc:8080/github/" 2>/dev/null || true
 	git config --system url."$gateway/github/".insteadOf "https://github.com/"
@@ -86,27 +74,32 @@ fi
 cd "$workspace"
 
 if [ $# -gt 0 ]; then
+	touch /tmp/ada-ready
 	exec "$@"
 fi
 
 case "$access" in
 	rex)
 		if [ -S /tmp/tailscale/tailscaled.sock ]; then
+			touch /tmp/ada-ready
 			exec rex server run --tailscaled-socket=/tmp/tailscale/tailscaled.sock --extra-listen=tailnet
 		fi
 		if [ -n "${TS_AUTHKEY:-}" ]; then
 			mkdir -p /tmp/tailscale
 			printf '%s' "$TS_AUTHKEY" >/tmp/tailscale/authkey
 			chmod 600 /tmp/tailscale/authkey
+			touch /tmp/ada-ready
 			exec rex server run \
 				--tailscale \
 				--tailscale-hostname="${ADA_SANDBOX_NAME:-$(hostname)}" \
 				--tailscale-auth-key-file=/tmp/tailscale/authkey \
 				--tailscale-advertise-tag="${TS_TAGS:-tag:ada}"
 		fi
+		touch /tmp/ada-ready
 		exec rex server run
 		;;
 	tty|headless)
+		touch /tmp/ada-ready
 		exec sleep infinity
 		;;
 	*)
