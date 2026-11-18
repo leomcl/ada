@@ -54,11 +54,11 @@ func newTestDynamicClient(t *testing.T) *dynamicfake.FakeDynamicClient {
 	return client
 }
 
-func newTestManager(t *testing.T, objects ...runtime.Object) (*Manager, *kubefake.Clientset, *dynamicfake.FakeDynamicClient) {
+func newTestClient(t *testing.T, objects ...runtime.Object) (*Client, *kubefake.Clientset, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
 	hasDefaultSecret := false
 	for _, obj := range objects {
-		if sec, ok := obj.(*corev1.Secret); ok && sec.Namespace == DefaultSystemNamespace && sec.Name == DefaultSigningKeySecretName {
+		if sec, ok := obj.(*corev1.Secret); ok && sec.Namespace == defaultSystemNamespace && sec.Name == defaultSigningKeySecretName {
 			hasDefaultSecret = true
 			break
 		}
@@ -66,30 +66,29 @@ func newTestManager(t *testing.T, objects ...runtime.Object) (*Manager, *kubefak
 	if !hasDefaultSecret {
 		objects = append(objects, &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      DefaultSigningKeySecretName,
-				Namespace: DefaultSystemNamespace,
+				Name:      defaultSigningKeySecretName,
+				Namespace: defaultSystemNamespace,
 			},
 			Data: map[string][]byte{
-				DefaultSigningKeySecretKey: []byte("cluster-signing-secret-key\n"),
+				signingKeySecretKey: []byte("cluster-signing-secret-key\n"),
 			},
 		})
 	}
 	kubeClient := kubefake.NewSimpleClientset(objects...)
 	dynamicClient := newTestDynamicClient(t)
-	fixedNow := func() time.Time { return time.Unix(1700000000, 0).UTC() }
-	return NewManager(kubeClient, dynamicClient, fixedNow), kubeClient, dynamicClient
+	return &Client{kube: kubeClient, dynamic: dynamicClient}, kubeClient, dynamicClient
 }
 
-func TestGenerateSandboxName(t *testing.T) {
+func TestGenerateName(t *testing.T) {
 	pattern := regexp.MustCompile(`^[a-z][a-z0-9-]*-[0-9a-f]{8}$`)
 
-	nameA, err := GenerateSandboxName("leomcl/Better_Branch.git")
+	nameA, err := GenerateName("leomcl/Better_Branch.git")
 	if err != nil {
-		t.Fatalf("GenerateSandboxName: %v", err)
+		t.Fatalf("GenerateName: %v", err)
 	}
-	nameB, err := GenerateSandboxName("leomcl/Better_Branch.git")
+	nameB, err := GenerateName("leomcl/Better_Branch.git")
 	if err != nil {
-		t.Fatalf("GenerateSandboxName: %v", err)
+		t.Fatalf("GenerateName: %v", err)
 	}
 
 	if !strings.HasPrefix(nameA, "better-branch-") {
@@ -102,31 +101,37 @@ func TestGenerateSandboxName(t *testing.T) {
 		t.Fatalf("expected unique names across calls, got duplicate %q", nameA)
 	}
 
-	longRepo := "org/" + strings.Repeat("verylongname-", 8)
-	longName, err := GenerateSandboxName(longRepo)
+	numericName, err := GenerateName("org/123app")
 	if err != nil {
-		t.Fatalf("GenerateSandboxName(long): %v", err)
+		t.Fatalf("GenerateName(numeric): %v", err)
+	}
+	if !strings.HasPrefix(numericName, "s-123app-") {
+		t.Fatalf("expected prefix s-123app-, got %q", numericName)
+	}
+	if !pattern.MatchString(numericName) {
+		t.Fatalf("numeric repo did not produce valid DNS-1035 label: %q", numericName)
+	}
+
+	longRepo := "org/" + strings.Repeat("abcde-", 11)
+	longName, err := GenerateName(longRepo)
+	if err != nil {
+		t.Fatalf("GenerateName(long): %v", err)
 	}
 	if len(longName) > 63 {
 		t.Fatalf("name exceeded 63 chars: len=%d (%q)", len(longName), longName)
 	}
+	if strings.Contains(longName, "--") {
+		t.Fatalf("truncated name kept trailing dash before suffix: %q", longName)
+	}
 	if !pattern.MatchString(longName) {
 		t.Fatalf("invalid truncated DNS label %q", longName)
-	}
-
-	numericName, err := GenerateSandboxName("org/123app")
-	if err != nil {
-		t.Fatalf("GenerateSandboxName(numeric): %v", err)
-	}
-	if !pattern.MatchString(numericName) {
-		t.Fatalf("numeric repo did not produce valid DNS-1035 label: %q", numericName)
 	}
 }
 
 func TestCreateSandboxAndSecret(t *testing.T) {
 	ctx := context.Background()
 	signingKey := []byte("cluster-signing-secret-key")
-	mgr, kubeClient, _ := newTestManager(t)
+	client, kubeClient, _ := newTestClient(t)
 
 	cfg := Defaults()
 	cfg.Repo = "leomcl/better-branch.git"
@@ -134,7 +139,7 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 	cfg.Harness = "claude"
 	cfg.TailscaleAuthKey = "tskey-ephemeral-1"
 
-	sb, err := mgr.Create(ctx, cfg)
+	sb, err := client.Create(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -144,7 +149,7 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 	}
 	secretName := sb.Name + "-token"
 
-	secret, err := kubeClient.CoreV1().Secrets(DefaultWorkloadNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	secret, err := kubeClient.CoreV1().Secrets(defaultWorkloadNamespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get created secret: %v", err)
 	}
@@ -152,7 +157,7 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 		t.Fatalf("secret ts-authkey: got %q", gotTS)
 	}
 
-	claims, err := token.VerifySandboxToken(string(secret.Data["token"]), signingKey, time.Unix(1700000100, 0))
+	claims, err := token.VerifySandboxToken(string(secret.Data["token"]), signingKey, time.Now())
 	if err != nil {
 		t.Fatalf("VerifySandboxToken: %v", err)
 	}
@@ -230,11 +235,11 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 		"ADA_SANDBOX_NAME":       sb.Name,
 		"ACCESS":                 "rex",
 		"HARNESS":                "claude",
-		"ADA_GATEWAY":            DefaultGatewayURL,
-		"OPENAI_BASE_URL":        DefaultGatewayURL + "/v1",
-		"ANTHROPIC_BASE_URL":     DefaultGatewayURL + "/anthropic",
-		"GEMINI_API_BASE_URL":    DefaultGatewayURL + "/google",
-		"GOOGLE_GEMINI_BASE_URL": DefaultGatewayURL + "/google",
+		"ADA_GATEWAY":            defaultGatewayURL,
+		"OPENAI_BASE_URL":        defaultGatewayURL + "/v1",
+		"ANTHROPIC_BASE_URL":     defaultGatewayURL + "/anthropic",
+		"GEMINI_API_BASE_URL":    defaultGatewayURL + "/google",
+		"GOOGLE_GEMINI_BASE_URL": defaultGatewayURL + "/google",
 	}
 	for k, wantVal := range wantPlain {
 		if got := envMap[k].Value; got != wantVal {
@@ -245,7 +250,7 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 
 func TestCreateDoesNotLeaveSecretOnSandboxError(t *testing.T) {
 	ctx := context.Background()
-	mgr, kubeClient, dynamicClient := newTestManager(t)
+	client, kubeClient, dynamicClient := newTestClient(t)
 	dynamicClient.PrependReactor("create", "sandboxes", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("webhook rejected sandbox")
 	})
@@ -254,11 +259,11 @@ func TestCreateDoesNotLeaveSecretOnSandboxError(t *testing.T) {
 	cfg.Repo = "leomcl/ada"
 	cfg.SandboxName = "ada-fail"
 
-	if _, err := mgr.Create(ctx, cfg); err == nil {
+	if _, err := client.Create(ctx, cfg); err == nil {
 		t.Fatal("expected error when sandbox creation fails")
 	}
 
-	_, getErr := kubeClient.CoreV1().Secrets(DefaultWorkloadNamespace).Get(ctx, "ada-fail-token", metav1.GetOptions{})
+	_, getErr := kubeClient.CoreV1().Secrets(defaultWorkloadNamespace).Get(ctx, "ada-fail-token", metav1.GetOptions{})
 	if !apierrors.IsNotFound(getErr) {
 		t.Fatalf("expected no secret to be created, got err=%v", getErr)
 	}
@@ -266,7 +271,7 @@ func TestCreateDoesNotLeaveSecretOnSandboxError(t *testing.T) {
 
 func TestCreateCleansUpSandboxOnSecretError(t *testing.T) {
 	ctx := context.Background()
-	mgr, kubeClient, dynamicClient := newTestManager(t)
+	client, kubeClient, dynamicClient := newTestClient(t)
 	kubeClient.PrependReactor("create", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("secret quota exceeded")
 	})
@@ -275,11 +280,11 @@ func TestCreateCleansUpSandboxOnSecretError(t *testing.T) {
 	cfg.Repo = "leomcl/ada"
 	cfg.SandboxName = "ada-secret-fail"
 
-	if _, err := mgr.Create(ctx, cfg); err == nil {
+	if _, err := client.Create(ctx, cfg); err == nil {
 		t.Fatal("expected error when secret creation fails")
 	}
 
-	_, getErr := dynamicClient.Resource(SandboxGVR).Namespace(DefaultWorkloadNamespace).Get(ctx, "ada-secret-fail", metav1.GetOptions{})
+	_, getErr := dynamicClient.Resource(SandboxGVR).Namespace(defaultWorkloadNamespace).Get(ctx, "ada-secret-fail", metav1.GetOptions{})
 	if !apierrors.IsNotFound(getErr) {
 		t.Fatalf("expected sandbox to be cleaned up, got err=%v", getErr)
 	}
@@ -287,7 +292,7 @@ func TestCreateCleansUpSandboxOnSecretError(t *testing.T) {
 
 func TestListAndDeleteSandboxes(t *testing.T) {
 	ctx := context.Background()
-	mgr, _, dynamicClient := newTestManager(t)
+	client, _, dynamicClient := newTestClient(t)
 
 	cfg := Defaults()
 	cfg.Repo = "leomcl/ada"
@@ -295,7 +300,7 @@ func TestListAndDeleteSandboxes(t *testing.T) {
 	cfg.Access = "tty"
 	cfg.Harness = "opencode"
 
-	if _, err := mgr.Create(ctx, cfg); err != nil {
+	if _, err := client.Create(ctx, cfg); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -305,15 +310,15 @@ func TestListAndDeleteSandboxes(t *testing.T) {
 			"kind":       SandboxKind,
 			"metadata": map[string]any{
 				"name":      "not-managed-by-ada",
-				"namespace": DefaultWorkloadNamespace,
+				"namespace": defaultWorkloadNamespace,
 			},
 		},
 	}
-	if _, err := dynamicClient.Resource(SandboxGVR).Namespace(DefaultWorkloadNamespace).Create(ctx, unrelated, metav1.CreateOptions{}); err != nil {
+	if _, err := dynamicClient.Resource(SandboxGVR).Namespace(defaultWorkloadNamespace).Create(ctx, unrelated, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create unrelated sandbox: %v", err)
 	}
 
-	items, err := mgr.List(ctx, DefaultWorkloadNamespace)
+	items, err := client.List(ctx, defaultWorkloadNamespace)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -324,11 +329,11 @@ func TestListAndDeleteSandboxes(t *testing.T) {
 		t.Fatalf("unexpected summary: %+v", items[0])
 	}
 
-	if err := mgr.Delete(ctx, DefaultWorkloadNamespace, "ada-one"); err != nil {
+	if err := client.Delete(ctx, defaultWorkloadNamespace, "ada-one"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	itemsAfter, err := mgr.List(ctx, DefaultWorkloadNamespace)
+	itemsAfter, err := client.List(ctx, defaultWorkloadNamespace)
 	if err != nil {
 		t.Fatalf("List after delete: %v", err)
 	}
@@ -337,20 +342,20 @@ func TestListAndDeleteSandboxes(t *testing.T) {
 	}
 }
 
-func TestWaitUntilReady(t *testing.T) {
+func TestWaitReady(t *testing.T) {
 	ctx := context.Background()
-	mgr, _, dynamicClient := newTestManager(t)
+	client, _, dynamicClient := newTestClient(t)
 
 	cfg := Defaults()
 	cfg.Repo = "leomcl/ada"
 	cfg.SandboxName = "ada-wait"
 
-	if _, err := mgr.Create(ctx, cfg); err != nil {
+	if _, err := client.Create(ctx, cfg); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
 	setStatusCondition := func(status metav1.ConditionStatus, reason, msg string) {
-		u, err := dynamicClient.Resource(SandboxGVR).Namespace(DefaultWorkloadNamespace).Get(ctx, "ada-wait", metav1.GetOptions{})
+		u, err := dynamicClient.Resource(SandboxGVR).Namespace(defaultWorkloadNamespace).Get(ctx, "ada-wait", metav1.GetOptions{})
 		if err != nil {
 			t.Fatalf("Get sandbox: %v", err)
 		}
@@ -370,30 +375,27 @@ func TestWaitUntilReady(t *testing.T) {
 		if err != nil {
 			t.Fatalf("toUnstructured: %v", err)
 		}
-		if _, err := dynamicClient.Resource(SandboxGVR).Namespace(DefaultWorkloadNamespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		if _, err := dynamicClient.Resource(SandboxGVR).Namespace(defaultWorkloadNamespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
 			t.Fatalf("UpdateStatus: %v", err)
 		}
 	}
 
-	go func() {
-		time.Sleep(15 * time.Millisecond)
-		setStatusCondition(metav1.ConditionTrue, "DependenciesReady", "ready")
-	}()
+	setStatusCondition(metav1.ConditionTrue, "DependenciesReady", "ready")
 
-	readyCtx, cancel := context.WithTimeout(ctx, time.Second)
+	readyCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	sb, err := mgr.WaitUntilReady(readyCtx, DefaultWorkloadNamespace, "ada-wait", 5*time.Millisecond)
+	sb, err := client.WaitReady(readyCtx, defaultWorkloadNamespace, "ada-wait")
 	if err != nil {
-		t.Fatalf("WaitUntilReady(ready): %v", err)
+		t.Fatalf("WaitReady(ready): %v", err)
 	}
 	if sb.Name != "ada-wait" {
 		t.Fatalf("unexpected sandbox returned: %s", sb.Name)
 	}
 
 	setStatusCondition(metav1.ConditionFalse, SandboxReasonPodFailed, "OOMKilled")
-	failCtx, cancelFail := context.WithTimeout(ctx, time.Second)
+	failCtx, cancelFail := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelFail()
-	if _, err := mgr.WaitUntilReady(failCtx, DefaultWorkloadNamespace, "ada-wait", 5*time.Millisecond); err == nil || !strings.Contains(err.Error(), "PodFailed") {
+	if _, err := client.WaitReady(failCtx, defaultWorkloadNamespace, "ada-wait"); err == nil || !strings.Contains(err.Error(), "PodFailed") {
 		t.Fatalf("expected terminal PodFailed error, got %v", err)
 	}
 }

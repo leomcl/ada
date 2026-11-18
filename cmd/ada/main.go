@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -18,7 +19,7 @@ import (
 
 const (
 	tokenUsage = "usage: ada token <owner/repo> [--ttl 12h] [--jti <sandbox-name>]  (key from ADA_SIGNING_KEY)"
-	upUsage    = "usage: ada up [owner/repo] [--config ada.yaml] [--access rex|tty|headless] [--harness opencode|claude|agy|\"\"] [--image <image>] [--namespace <ns>] [--system-namespace <ns>] [--signing-key-secret <name>] [--gateway <url>] [--runtime-class <name>] [--ttl 12h] [--tailscale-authkey <key>] [--wait=true] [--no-connect]"
+	upUsage    = "usage: ada up [owner/repo] [--access rex|tty|headless] [--harness opencode|claude|agy|\"\"] [--image <image>] [--namespace <ns>] [--system-namespace <ns>] [--signing-key-secret <name>] [--gateway <url>] [--runtime-class <name>] [--ttl 12h] [--tailscale-authkey <key>] [--wait=true] [--no-connect]"
 	lsUsage    = "usage: ada ls [--namespace <ns>]"
 	downUsage  = "usage: ada down <name> [--namespace <ns>]"
 	sshUsage   = "usage: ada ssh <name> [--namespace <ns>] [-- command...]  (runs kubectl exec)"
@@ -84,14 +85,14 @@ func printRootUsage(w io.Writer) {
 	fmt.Fprintln(w, "commands: up, ls, down, ssh, rex, token")
 }
 
-func runUp(ctx context.Context, args []string) error {
-	cfg, err := loadConfig(findConfigFlag(args))
-	if err != nil {
-		return err
-	}
+type upOptions struct {
+	Wait      bool
+	NoConnect bool
+}
 
+func newUpFlags(cfg *sandbox.Config) (*flag.FlagSet, *upOptions) {
+	opts := &upOptions{}
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
-	_ = fs.String("config", "", "path to ada.yaml")
 	fs.StringVar(&cfg.Access, "access", cfg.Access, "access mode: rex, tty, or headless")
 	fs.StringVar(&cfg.Harness, "harness", cfg.Harness, "coding harness: opencode, claude, agy, or empty")
 	fs.StringVar(&cfg.Image, "image", cfg.Image, "sandbox container image")
@@ -101,10 +102,19 @@ func runUp(ctx context.Context, args []string) error {
 	fs.StringVar(&cfg.GatewayURL, "gateway", cfg.GatewayURL, "ada-gateway base URL")
 	fs.StringVar(&cfg.RuntimeClass, "runtime-class", cfg.RuntimeClass, "Kubernetes RuntimeClassName (empty for none)")
 	fs.DurationVar(&cfg.TTL.Duration, "ttl", cfg.TTL.Duration, "sandbox and token lifetime")
-	fs.StringVar(&cfg.TailscaleAuthKey, "tailscale-authkey", cfg.TailscaleAuthKey, "Tailscale auth key")
-	waitReady := fs.Bool("wait", true, "wait for sandbox readiness")
-	noConnect := fs.Bool("no-connect", false, "do not attach after creation")
+	fs.StringVar(&cfg.TailscaleAuthKey, "tailscale-authkey", os.Getenv("TS_AUTHKEY"), "Tailscale auth key")
+	fs.BoolVar(&opts.Wait, "wait", true, "wait for sandbox readiness")
+	fs.BoolVar(&opts.NoConnect, "no-connect", false, "do not attach after creation")
+	return fs, opts
+}
 
+func runUp(ctx context.Context, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	fs, opts := newUpFlags(&cfg)
 	pos, err := parseFlags(fs, args, upUsage)
 	if err != nil {
 		return err
@@ -115,34 +125,34 @@ func runUp(ctx context.Context, args []string) error {
 	if len(pos) == 1 {
 		cfg.Repo = pos[0]
 	}
-	if cfg.Repo == "" {
+	if strings.TrimSpace(cfg.Repo) == "" {
 		return usageError{"ada up: repo is required via argument or ada.yaml\n" + upUsage}
 	}
 
-	mgr, err := sandbox.NewClusterManager()
+	client, err := sandbox.NewClient()
 	if err != nil {
 		return err
 	}
 
-	sb, err := mgr.Create(ctx, cfg)
+	sb, err := client.Create(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("created sandbox %s in %s (repo=%s access=%s)\n", sb.Name, sb.Namespace, cfg.Repo, cfg.Access)
+	fmt.Printf("created sandbox %s in %s (repo=%s access=%s)\n", sb.Name, sb.Namespace, sandbox.Repo(sb), cfg.Access)
 
-	if !*waitReady {
+	if !opts.Wait {
 		return nil
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	readySandbox, err := mgr.WaitUntilReady(waitCtx, sb.Namespace, sb.Name, time.Second)
+	readySandbox, err := client.WaitReady(waitCtx, sb.Namespace, sb.Name)
 	cancel()
 	if err != nil {
 		return err
 	}
 	fmt.Printf("sandbox %s is ready\n", readySandbox.Name)
 
-	if *noConnect {
+	if opts.NoConnect {
 		return nil
 	}
 
@@ -157,8 +167,13 @@ func runUp(ctx context.Context, args []string) error {
 }
 
 func runList(ctx context.Context, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
-	namespace := fs.String("namespace", sandbox.DefaultWorkloadNamespace, "workload namespace")
+	namespace := fs.String("namespace", cfg.Namespace, "workload namespace")
 	pos, err := parseFlags(fs, args, lsUsage)
 	if err != nil {
 		return err
@@ -167,12 +182,12 @@ func runList(ctx context.Context, args []string) error {
 		return usageError{lsUsage}
 	}
 
-	mgr, err := sandbox.NewClusterManager()
+	client, err := sandbox.NewClient()
 	if err != nil {
 		return err
 	}
 
-	items, err := mgr.List(ctx, *namespace)
+	items, err := client.List(ctx, *namespace)
 	if err != nil {
 		return err
 	}
@@ -199,80 +214,65 @@ func runList(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runDown(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("down", flag.ContinueOnError)
-	namespace := fs.String("namespace", sandbox.DefaultWorkloadNamespace, "workload namespace")
-	pos, err := parseFlags(fs, args, downUsage)
+func resolveSandbox(ctx context.Context, cmdName string, args []string, usage string) (*sandbox.Client, *sandbox.Sandbox, error) {
+	cfg, err := loadConfig()
 	if err != nil {
-		return err
+		return nil, nil, err
+	}
+
+	fs := flag.NewFlagSet(cmdName, flag.ContinueOnError)
+	namespace := fs.String("namespace", cfg.Namespace, "workload namespace")
+	pos, err := parseFlags(fs, args, usage)
+	if err != nil {
+		return nil, nil, err
 	}
 	if len(pos) != 1 {
-		return usageError{downUsage}
+		return nil, nil, usageError{usage}
 	}
-	nameArg := pos[0]
+	client, err := sandbox.NewClient()
+	if err != nil {
+		return nil, nil, err
+	}
+	sb, err := client.Get(ctx, *namespace, pos[0])
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, sb, nil
+}
 
-	mgr, err := sandbox.NewClusterManager()
+func runDown(ctx context.Context, args []string) error {
+	client, sb, err := resolveSandbox(ctx, "down", args, downUsage)
 	if err != nil {
 		return err
 	}
-	if err := mgr.Delete(ctx, *namespace, nameArg); err != nil {
+	if err := client.Delete(ctx, sb.Namespace, sb.Name); err != nil {
 		return err
 	}
-	fmt.Printf("deleted sandbox %s\n", nameArg)
+	fmt.Printf("deleted sandbox %s\n", sb.Name)
 	return nil
 }
 
 func runSSH(ctx context.Context, args []string) error {
 	beforeDash, command := splitDoubleDash(args)
-	fs := flag.NewFlagSet("ssh", flag.ContinueOnError)
-	namespace := fs.String("namespace", sandbox.DefaultWorkloadNamespace, "workload namespace")
-	pos, err := parseFlags(fs, beforeDash, sshUsage)
+	_, sb, err := resolveSandbox(ctx, "ssh", beforeDash, sshUsage)
 	if err != nil {
 		return err
 	}
-	if len(pos) != 1 {
-		return usageError{sshUsage}
-	}
-	nameArg := pos[0]
-
-	mgr, err := sandbox.NewClusterManager()
-	if err != nil {
-		return err
-	}
-	sb, err := mgr.Get(ctx, *namespace, nameArg)
-	if err != nil {
-		return err
-	}
-	return connectTTY(ctx, sb.Namespace, sandbox.PodName(sb), sb.Annotations[sandbox.HarnessAnnotation], command...)
+	return connectTTY(ctx, sb.Namespace, sandbox.PodName(sb), sandbox.Harness(sb), command...)
 }
 
 func runRex(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("rex", flag.ContinueOnError)
-	namespace := fs.String("namespace", sandbox.DefaultWorkloadNamespace, "workload namespace")
-	pos, err := parseFlags(fs, args, rexUsage)
+	_, sb, err := resolveSandbox(ctx, "rex", args, rexUsage)
 	if err != nil {
 		return err
 	}
-	if len(pos) != 1 {
-		return usageError{rexUsage}
-	}
-	nameArg := pos[0]
-
-	mgr, err := sandbox.NewClusterManager()
-	if err != nil {
-		return err
-	}
-	sb, err := mgr.Get(ctx, *namespace, nameArg)
-	if err != nil {
-		return err
-	}
-	return connectRex(ctx, sb.Namespace, sandbox.PodName(sb), sb.Name, sb.Annotations[sandbox.HarnessAnnotation])
+	return connectRex(ctx, sb.Namespace, sandbox.PodName(sb), sb.Name, sandbox.Harness(sb))
 }
 
 func runToken(args []string) error {
 	fs := flag.NewFlagSet("token", flag.ContinueOnError)
 	jti := fs.String("jti", "", "sandbox name the token is bound to (default: random)")
-	ttl := fs.Duration("ttl", sandbox.DefaultTokenTTL, "token lifetime")
+	ttl := fs.Duration("ttl", sandbox.Defaults().TTL.Duration, "token lifetime")
 	pos, err := parseFlags(fs, args, tokenUsage)
 	if err != nil {
 		return err
@@ -289,7 +289,7 @@ func runToken(args []string) error {
 
 	tokenID := *jti
 	if tokenID == "" {
-		tokenID, err = sandbox.GenerateSandboxName("local")
+		tokenID, err = sandbox.GenerateName("local")
 		if err != nil {
 			return err
 		}
