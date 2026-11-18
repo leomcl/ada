@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ada-system
+  labels:
+    kubernetes.io/metadata.name: ada-system
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cliproxy-state
+  namespace: ada-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ada-gateway
+  namespace: ada-system
+  labels:
+    app.kubernetes.io/name: ada-gateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ada-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ada-gateway
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: ada-gateway
+          image: ada-gateway:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADA_LISTEN_ADDR
+              value: ":8080"
+            - name: CLIPROXY_BASE_URL
+              value: "http://127.0.0.1:8317"
+            - name: ADA_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ada-signing-key
+                  key: signing-key
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: ada-gateway-secrets
+                  key: github-pat
+            - name: CLIPROXY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ada-gateway-secrets
+                  key: cliproxy-api-key
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 125m
+              memory: 256Mi
+            limits:
+              cpu: 125m
+              memory: 256Mi
+        - name: cliproxy
+          image: eceasy/cli-proxy-api:v7.3.6@sha256:94a1616cb6731cb19f5873e096a1e8611d78d4644486809546905bc0e1fc23cd
+          livenessProbe:
+            exec:
+              command:
+                - nc
+                - -z
+                - 127.0.0.1
+                - "8317"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - nc
+                - -z
+                - 127.0.0.1
+                - "8317"
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - name: cliproxy-config
+              mountPath: /CLIProxyAPI/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: cliproxy-state
+              mountPath: /root/.cli-proxy-api
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 125m
+              memory: 256Mi
+            limits:
+              cpu: 125m
+              memory: 256Mi
+      volumes:
+        - name: cliproxy-config
+          secret:
+            secretName: ada-gateway-secrets
+            items:
+              - key: cliproxy-config.yaml
+                path: config.yaml
+        - name: cliproxy-state
+          persistentVolumeClaim:
+            claimName: cliproxy-state
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ada-gateway
+  namespace: ada-system
+  labels:
+    app.kubernetes.io/name: ada-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ada-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

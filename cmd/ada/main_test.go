@@ -50,6 +50,10 @@ systemNamespace: sys-ns
 signingKeySecret: custom-signing-key
 gatewayURL: http://custom-gw:8080/
 runtimeClass: kata
+cpu: "4"
+memory: 8Gi
+ephemeralStorage: 20Gi
+spot: true
 ttl: 6h
 tailscaleAuthKey: ignored-from-file
 `
@@ -65,7 +69,8 @@ tailscaleAuthKey: ignored-from-file
 	if cfg.Repo != "leomcl/ada" || cfg.Access != "rex" || cfg.Harness != "claude" ||
 		cfg.Image != "ghcr.io/leomcl/ada-base:v1" || cfg.Namespace != "team-sandboxes" ||
 		cfg.SystemNamespace != "sys-ns" || cfg.SigningKeySecret != "custom-signing-key" ||
-		cfg.RuntimeClass != "kata" || cfg.TTL.Duration != 6*time.Hour ||
+		cfg.RuntimeClass != "kata" || cfg.CPU != "4" || cfg.Memory != "8Gi" ||
+		cfg.EphemeralStorage != "20Gi" || !cfg.Spot || cfg.TTL.Duration != 6*time.Hour ||
 		cfg.TailscaleAuthKey != "" {
 		t.Fatalf("unexpected loaded config: %+v", cfg)
 	}
@@ -76,7 +81,7 @@ tailscaleAuthKey: ignored-from-file
 		t.Fatalf("TailscaleAuthKey env default: got %q, want tskey-from-env", cfg.TailscaleAuthKey)
 	}
 
-	if _, err := parseFlags(fs, []string{"--access", "tty", "--harness", "", "--runtime-class", "", "--ttl", "2h", "--tailscale-authkey", "tskey-from-flag"}, upUsage); err != nil {
+	if _, err := parseFlags(fs, []string{"--access", "tty", "--harness", "", "--runtime-class", "", "--cpu", "1", "--memory", "2Gi", "--ephemeral-storage", "5Gi", "--spot=false", "--ttl", "2h", "--tailscale-authkey", "tskey-from-flag"}, upUsage); err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
 
@@ -88,6 +93,9 @@ tailscaleAuthKey: ignored-from-file
 	}
 	if cfg.RuntimeClass != "" {
 		t.Fatalf("RuntimeClass empty override: got %q, want empty", cfg.RuntimeClass)
+	}
+	if cfg.CPU != "1" || cfg.Memory != "2Gi" || cfg.EphemeralStorage != "5Gi" || cfg.Spot {
+		t.Fatalf("resource/spot override failed: %+v", cfg)
 	}
 	if cfg.TTL.Duration != 2*time.Hour {
 		t.Fatalf("TTL override: got %s, want 2h", cfg.TTL.Duration)

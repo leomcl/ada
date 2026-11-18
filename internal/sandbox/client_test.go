@@ -12,6 +12,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -137,6 +138,7 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 	cfg.Repo = "leomcl/better-branch.git"
 	cfg.Access = "rex"
 	cfg.Harness = "claude"
+	cfg.Spot = true
 	cfg.TailscaleAuthKey = "tskey-ephemeral-1"
 
 	sb, err := client.Create(ctx, cfg)
@@ -189,11 +191,34 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 	if podSpec.AutomountServiceAccountToken == nil || *podSpec.AutomountServiceAccountToken {
 		t.Fatalf("expected automountServiceAccountToken=false, got %v", podSpec.AutomountServiceAccountToken)
 	}
+	if podSpec.NodeSelector[gkeSpotNodeSelectorKey] != "true" {
+		t.Fatalf("expected spot nodeSelector, got %+v", podSpec.NodeSelector)
+	}
+	if !Spot(sb) {
+		t.Fatal("expected Spot(sb) to be true")
+	}
 	if len(podSpec.Containers) != 1 {
 		t.Fatalf("expected 1 container, got %d", len(podSpec.Containers))
 	}
 
 	container := podSpec.Containers[0]
+	if container.SecurityContext == nil || container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatalf("expected allowPrivilegeEscalation=false, got %+v", container.SecurityContext)
+	}
+	wantResources := map[corev1.ResourceName]string{
+		corev1.ResourceCPU:              "2",
+		corev1.ResourceMemory:           "4Gi",
+		corev1.ResourceEphemeralStorage: "10Gi",
+	}
+	for resName, wantQty := range wantResources {
+		want := resource.MustParse(wantQty)
+		if got := container.Resources.Requests[resName]; !got.Equal(want) {
+			t.Fatalf("resource request %s: got %s, want %s", resName, got.String(), want.String())
+		}
+		if got := container.Resources.Limits[resName]; !got.Equal(want) {
+			t.Fatalf("resource limit %s: got %s, want %s", resName, got.String(), want.String())
+		}
+	}
 	if container.ReadinessProbe == nil || container.ReadinessProbe.Exec == nil {
 		t.Fatalf("expected exec ReadinessProbe on sandbox container, got %+v", container.ReadinessProbe)
 	}
@@ -325,7 +350,7 @@ func TestListAndDeleteSandboxes(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("expected 1 ada-managed sandbox, got %d: %+v", len(items), items)
 	}
-	if items[0].Name != "ada-one" || items[0].Repo != "leomcl/ada" || items[0].Access != "tty" || items[0].Harness != "opencode" {
+	if items[0].Name != "ada-one" || items[0].Repo != "leomcl/ada" || items[0].Access != "tty" || items[0].Harness != "opencode" || items[0].Spot {
 		t.Fatalf("unexpected summary: %+v", items[0])
 	}
 
