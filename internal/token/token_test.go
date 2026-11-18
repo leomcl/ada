@@ -104,3 +104,37 @@ func TestVerifyRejectsTamperedPayloadAndUnsupportedAlg(t *testing.T) {
 		t.Fatal("expected error for unsupported alg")
 	}
 }
+
+func TestParseSigningKeyTrimsWhitespace(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	keyWithNewline := []byte("  cluster-signing-secret-key\n")
+	trimmedKey := []byte("cluster-signing-secret-key")
+
+	parsed, err := ParseSigningKey(keyWithNewline)
+	if err != nil {
+		t.Fatalf("ParseSigningKey: %v", err)
+	}
+	if string(parsed) != string(trimmedKey) {
+		t.Fatalf("ParseSigningKey: got %q, want %q", parsed, trimmedKey)
+	}
+
+	for _, empty := range [][]byte{nil, []byte(""), []byte("  \n\t ")} {
+		if _, err := ParseSigningKey(empty); err == nil {
+			t.Fatalf("expected error for empty/whitespace key %q", empty)
+		}
+	}
+
+	claims := SandboxTokenClaims{
+		JTI:       "sandbox-123",
+		Repo:      "leomcl/ada",
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(time.Hour).Unix(),
+	}
+	raw, err := MintSandboxToken(claims, parsed)
+	if err != nil {
+		t.Fatalf("MintSandboxToken: %v", err)
+	}
+	if _, err := VerifySandboxToken(raw, trimmedKey, now); err != nil {
+		t.Fatalf("VerifySandboxToken with trimmed key failed: %v", err)
+	}
+}

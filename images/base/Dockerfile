@@ -20,12 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV PATH="/root/.local/bin:/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-	DISABLE_AUTOUPDATER=1 \
-	ADA_GATEWAY=http://ada-gateway.ada-system.svc:8080 \
-	OPENAI_BASE_URL=http://ada-gateway.ada-system.svc:8080/v1 \
-	ANTHROPIC_BASE_URL=http://ada-gateway.ada-system.svc:8080/anthropic \
-	GEMINI_API_BASE_URL=http://ada-gateway.ada-system.svc:8080/google \
-	GOOGLE_GEMINI_BASE_URL=http://ada-gateway.ada-system.svc:8080/google
+	DISABLE_AUTOUPDATER=1
 
 COPY gitconfig /etc/gitconfig
 COPY ada-pr /usr/local/bin/ada-pr

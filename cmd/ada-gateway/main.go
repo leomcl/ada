@@ -7,16 +7,17 @@ import (
 	"time"
 
 	"github.com/leomcl/ada/internal/gateway"
+	"github.com/leomcl/ada/internal/token"
 )
 
 func main() {
-	signingKey := os.Getenv("ADA_SIGNING_KEY")
-	if signingKey == "" {
-		log.Fatal("ADA_SIGNING_KEY must be set")
+	signingKey, err := token.ParseSigningKey([]byte(os.Getenv("ADA_SIGNING_KEY")))
+	if err != nil {
+		log.Fatalf("ADA_SIGNING_KEY: %v", err)
 	}
 
 	handler, err := gateway.NewHandler(gateway.Config{
-		SigningKey:       []byte(signingKey),
+		SigningKey:       signingKey,
 		GitHubPAT:        os.Getenv("GITHUB_PAT"),
 		GitHubBaseURL:    envOrDefault("GITHUB_BASE_URL", "https://github.com"),
 		GitHubAPIBaseURL: envOrDefault("GITHUB_API_BASE_URL", "https://api.github.com"),

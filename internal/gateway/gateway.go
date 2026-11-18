@@ -62,9 +62,11 @@ type gateway struct {
 }
 
 func NewHandler(cfg Config) (http.Handler, error) {
-	if len(cfg.SigningKey) == 0 {
-		return nil, errors.New("signing key must not be empty")
+	signingKey, err := token.ParseSigningKey(cfg.SigningKey)
+	if err != nil {
+		return nil, err
 	}
+	cfg.SigningKey = signingKey
 	cfg.GitHubPAT = strings.TrimSpace(cfg.GitHubPAT)
 	cfg.CLIProxyAPIKey = strings.TrimSpace(cfg.CLIProxyAPIKey)
 
