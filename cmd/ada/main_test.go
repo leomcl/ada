@@ -26,7 +26,7 @@ func TestLoadConfigAndPrecedence(t *testing.T) {
 	t.Setenv("TS_AUTHKEY", "")
 	t.Setenv("ADA_CONFIG", "")
 
-	missingDefault, err := loadConfig("")
+	missingDefault, err := loadConfig()
 	if err != nil {
 		t.Fatalf("expected missing default ada.yaml to succeed, got: %v", err)
 	}
@@ -34,12 +34,8 @@ func TestLoadConfigAndPrecedence(t *testing.T) {
 		t.Fatalf("expected Defaults(), got %+v", missingDefault)
 	}
 
-	if _, err := loadConfig(filepath.Join(dir, "explicit-missing.yaml")); err == nil {
-		t.Fatal("expected error for explicit missing config file")
-	}
-
 	t.Setenv("ADA_CONFIG", filepath.Join(dir, "env-missing.yaml"))
-	if _, err := loadConfig(""); err == nil {
+	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected error when ADA_CONFIG points to missing file")
 	}
 	t.Setenv("ADA_CONFIG", "")
@@ -62,7 +58,7 @@ tailscaleAuthKey: ignored-from-file
 	}
 
 	t.Setenv("TS_AUTHKEY", "tskey-from-env")
-	cfg, err := loadConfig("")
+	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
@@ -70,17 +66,16 @@ tailscaleAuthKey: ignored-from-file
 		cfg.Image != "ghcr.io/leomcl/ada-base:v1" || cfg.Namespace != "team-sandboxes" ||
 		cfg.SystemNamespace != "sys-ns" || cfg.SigningKeySecret != "custom-signing-key" ||
 		cfg.RuntimeClass != "kata" || cfg.TTL.Duration != 6*time.Hour ||
-		cfg.TailscaleAuthKey != "tskey-from-env" {
+		cfg.TailscaleAuthKey != "" {
 		t.Fatalf("unexpected loaded config: %+v", cfg)
 	}
 
-	// Flags override YAML and env, including empty string for runtimeClass and harness.
-	fs := flag.NewFlagSet("up", flag.ContinueOnError)
-	fs.StringVar(&cfg.Access, "access", cfg.Access, "")
-	fs.StringVar(&cfg.Harness, "harness", cfg.Harness, "")
-	fs.StringVar(&cfg.RuntimeClass, "runtime-class", cfg.RuntimeClass, "")
-	fs.DurationVar(&cfg.TTL.Duration, "ttl", cfg.TTL.Duration, "")
-	fs.StringVar(&cfg.TailscaleAuthKey, "tailscale-authkey", cfg.TailscaleAuthKey, "")
+	// newUpFlags picks up TS_AUTHKEY and lets CLI flags override YAML and env (including empty values).
+	fs, _ := newUpFlags(&cfg)
+	if cfg.TailscaleAuthKey != "tskey-from-env" {
+		t.Fatalf("TailscaleAuthKey env default: got %q, want tskey-from-env", cfg.TailscaleAuthKey)
+	}
+
 	if _, err := parseFlags(fs, []string{"--access", "tty", "--harness", "", "--runtime-class", "", "--ttl", "2h", "--tailscale-authkey", "tskey-from-flag"}, upUsage); err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
@@ -102,17 +97,7 @@ tailscaleAuthKey: ignored-from-file
 	}
 }
 
-func TestParseFlagsAndFindConfigFlag(t *testing.T) {
-	if got := findConfigFlag([]string{"owner/repo", "--config", "custom.yaml", "--wait=false"}); got != "custom.yaml" {
-		t.Fatalf("findConfigFlag: got %q", got)
-	}
-	if got := findConfigFlag([]string{"--config=alt.yaml", "owner/repo"}); got != "alt.yaml" {
-		t.Fatalf("findConfigFlag(=): got %q", got)
-	}
-	if got := findConfigFlag([]string{"my-sb", "--", "--config", "after-dash.yaml"}); got != "" {
-		t.Fatalf("findConfigFlag after --: got %q", got)
-	}
-
+func TestParseFlags(t *testing.T) {
 	cases := []struct {
 		name    string
 		args    []string

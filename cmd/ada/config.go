@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"sigs.k8s.io/yaml"
 
@@ -13,20 +12,13 @@ import (
 
 const defaultConfigPath = "ada.yaml"
 
-func loadConfig(path string) (sandbox.Config, error) {
+func loadConfig() (sandbox.Config, error) {
 	cfg := sandbox.Defaults()
-	if ts := os.Getenv("TS_AUTHKEY"); ts != "" {
-		cfg.TailscaleAuthKey = ts
-	}
 
+	path := os.Getenv("ADA_CONFIG")
 	explicit := path != ""
 	if !explicit {
-		if envPath := os.Getenv("ADA_CONFIG"); envPath != "" {
-			path = envPath
-			explicit = true
-		} else {
-			path = defaultConfigPath
-		}
+		path = defaultConfigPath
 	}
 
 	data, err := os.ReadFile(path)
@@ -41,23 +33,4 @@ func loadConfig(path string) (sandbox.Config, error) {
 		return sandbox.Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return cfg, nil
-}
-
-func findConfigFlag(args []string) string {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		if val, ok := strings.CutPrefix(arg, "--config="); ok {
-			return val
-		}
-		if val, ok := strings.CutPrefix(arg, "-config="); ok {
-			return val
-		}
-		if (arg == "--config" || arg == "-config") && i+1 < len(args) {
-			return args[i+1]
-		}
-	}
-	return ""
 }

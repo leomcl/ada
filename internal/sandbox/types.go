@@ -1,9 +1,4 @@
-// Package sandbox manages agent-sandbox Kubernetes resources.
-//
-// The Sandbox CRD types below are a deliberate minimal copy of
-// sigs.k8s.io/agent-sandbox/api/v1beta1 (verified against the installed
-// sandboxes.agents.x-k8s.io v1beta1 CRD) to avoid pulling in the upstream
-// controller-runtime/agent-sandbox dependency tree.
+// Sandbox types are copied from sigs.k8s.io/agent-sandbox/api/v1beta1 to avoid pulling in controller-runtime.
 package sandbox
 
 import (
