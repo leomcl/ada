@@ -204,6 +204,10 @@ func (gw *gateway) handleModelProxy(w http.ResponseWriter, r *http.Request) {
 	if _, ok := gw.authenticate(w, r); !ok {
 		return
 	}
+	if !modelOperationAllowed(r.Method, r.URL.Path) {
+		http.Error(w, "forbidden model operation", http.StatusForbidden)
+		return
+	}
 
 	gw.cliproxyProxy.ServeHTTP(w, r)
 }
@@ -270,6 +274,17 @@ func githubAPIAllowed(method, rest string) bool {
 		}
 	}
 	return false
+}
+
+func modelOperationAllowed(method, requestPath string) bool {
+	if method != http.MethodGet && method != http.MethodPost {
+		return false
+	}
+	upstreamPath := modelUpstreamPath(requestPath)
+	if !validRelativePath(strings.TrimPrefix(upstreamPath, "/")) {
+		return false
+	}
+	return strings.HasPrefix(upstreamPath, "/v1/") || strings.HasPrefix(upstreamPath, "/v1beta/")
 }
 
 func modelUpstreamPath(requestPath string) string {
@@ -379,6 +394,9 @@ func validSingleSegment(segment string) bool {
 }
 
 func validRelativePath(rel string) bool {
+	if strings.Contains(rel, "\\") {
+		return false
+	}
 	for _, seg := range strings.Split(rel, "/") {
 		if seg == "." || seg == ".." {
 			return false

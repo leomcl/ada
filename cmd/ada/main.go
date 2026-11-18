@@ -19,7 +19,7 @@ import (
 
 const (
 	tokenUsage = "usage: ada token <owner/repo> [--ttl 12h] [--jti <sandbox-name>]  (key from ADA_SIGNING_KEY)"
-	upUsage    = "usage: ada up [owner/repo] [--access rex|tty|headless] [--harness opencode|claude|agy|\"\"] [--image <image>] [--namespace <ns>] [--system-namespace <ns>] [--signing-key-secret <name>] [--gateway <url>] [--runtime-class <name>] [--ttl 12h] [--tailscale-authkey <key>] [--wait=true] [--no-connect]"
+	upUsage    = "usage: ada up [owner/repo] [--access rex|tty|headless] [--harness opencode|claude|agy|\"\"] [--image <image>] [--namespace <ns>] [--system-namespace <ns>] [--signing-key-secret <name>] [--gateway <url>] [--runtime-class <name>] [--cpu 2] [--memory 4Gi] [--ephemeral-storage 10Gi] [--spot] [--ttl 12h] [--tailscale-authkey <key>] [--wait=true] [--no-connect]"
 	lsUsage    = "usage: ada ls [--namespace <ns>]"
 	downUsage  = "usage: ada down <name> [--namespace <ns>]"
 	sshUsage   = "usage: ada ssh <name> [--namespace <ns>] [-- command...]  (runs kubectl exec)"
@@ -101,6 +101,10 @@ func newUpFlags(cfg *sandbox.Config) (*flag.FlagSet, *upOptions) {
 	fs.StringVar(&cfg.SigningKeySecret, "signing-key-secret", cfg.SigningKeySecret, "secret name holding signing key")
 	fs.StringVar(&cfg.GatewayURL, "gateway", cfg.GatewayURL, "ada-gateway base URL")
 	fs.StringVar(&cfg.RuntimeClass, "runtime-class", cfg.RuntimeClass, "Kubernetes RuntimeClassName (empty for none)")
+	fs.StringVar(&cfg.CPU, "cpu", cfg.CPU, "container CPU request and limit")
+	fs.StringVar(&cfg.Memory, "memory", cfg.Memory, "container memory request and limit")
+	fs.StringVar(&cfg.EphemeralStorage, "ephemeral-storage", cfg.EphemeralStorage, "container ephemeral-storage request and limit")
+	fs.BoolVar(&cfg.Spot, "spot", cfg.Spot, "schedule sandbox on GKE Spot capacity")
 	fs.DurationVar(&cfg.TTL.Duration, "ttl", cfg.TTL.Duration, "sandbox and token lifetime")
 	fs.StringVar(&cfg.TailscaleAuthKey, "tailscale-authkey", os.Getenv("TS_AUTHKEY"), "Tailscale auth key")
 	fs.BoolVar(&opts.Wait, "wait", true, "wait for sandbox readiness")
@@ -193,7 +197,7 @@ func runList(ctx context.Context, args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tREPO\tACCESS\tHARNESS\tREADY\tAGE")
+	fmt.Fprintln(tw, "NAME\tREPO\tACCESS\tHARNESS\tSPOT\tREADY\tAGE")
 	now := time.Now()
 	for _, item := range items {
 		harness := item.Harness
@@ -208,7 +212,7 @@ func runList(ctx context.Context, args []string) error {
 		if !item.CreatedAt.IsZero() {
 			age = formatAge(now.Sub(item.CreatedAt))
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", item.Name, item.Repo, item.Access, harness, ready, age)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\n", item.Name, item.Repo, item.Access, harness, item.Spot, ready, age)
 	}
 	_ = tw.Flush()
 	return nil

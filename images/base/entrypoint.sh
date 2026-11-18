@@ -7,6 +7,8 @@ gateway="${ADA_GATEWAY%/}"
 workspace="${WORKSPACE:-/workspace}"
 access="${ACCESS:-tty}"
 harness="${HARNESS:-}"
+ts_authkey="${TS_AUTHKEY:-}"
+unset TS_AUTHKEY
 
 install_harness() {
 	case "$1" in
@@ -42,7 +44,7 @@ if [ "$access" = "rex" ] || [ "${WITH_REX:-false}" = "true" ]; then
 	install_rex
 fi
 
-if [ "${WITH_TAILSCALE:-false}" = "true" ] || { [ -n "${TS_AUTHKEY:-}" ] && [ "$access" != "rex" ]; }; then
+if [ "${WITH_TAILSCALE:-false}" = "true" ] || { [ -n "$ts_authkey" ] && [ "$access" != "rex" ]; }; then
 	install_tailscale
 fi
 
@@ -55,14 +57,14 @@ if [ "$gateway" != "http://ada-gateway.ada-system.svc:8080" ]; then
 	git config --system url."$gateway/github/".insteadOf "https://github.com/"
 fi
 
-if [ -n "${TS_AUTHKEY:-}" ] && command -v tailscaled >/dev/null 2>&1; then
+if [ -n "$ts_authkey" ] && command -v tailscaled >/dev/null 2>&1; then
 	mkdir -p /tmp/tailscale
 	tailscaled \
 		--tun=userspace-networking \
 		--state=/tmp/tailscale/tailscaled.state \
 		--socket=/tmp/tailscale/tailscaled.sock &
 	tailscale --socket=/tmp/tailscale/tailscaled.sock up \
-		--authkey="$TS_AUTHKEY" \
+		--authkey="$ts_authkey" \
 		--hostname="${ADA_SANDBOX_NAME:-$(hostname)}" \
 		--advertise-tags="${TS_TAGS:-tag:ada}"
 fi
@@ -84,9 +86,9 @@ case "$access" in
 			touch /tmp/ada-ready
 			exec rex server run --tailscaled-socket=/tmp/tailscale/tailscaled.sock --extra-listen=tailnet
 		fi
-		if [ -n "${TS_AUTHKEY:-}" ]; then
+		if [ -n "$ts_authkey" ]; then
 			mkdir -p /tmp/tailscale
-			printf '%s' "$TS_AUTHKEY" >/tmp/tailscale/authkey
+			printf '%s' "$ts_authkey" >/tmp/tailscale/authkey
 			chmod 600 /tmp/tailscale/authkey
 			touch /tmp/ada-ready
 			exec rex server run \

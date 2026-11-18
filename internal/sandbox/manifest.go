@@ -8,18 +8,21 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
 const (
-	managedByLabel    = "app.kubernetes.io/managed-by"
-	managedByValue    = "ada"
-	sandboxNameLabel  = "ada.io/sandbox"
-	repoAnnotation    = "ada.io/repo"
-	accessAnnotation  = "ada.io/access"
-	harnessAnnotation = "ada.io/harness"
-	podNameAnnotation = "agents.x-k8s.io/pod-name"
+	managedByLabel         = "app.kubernetes.io/managed-by"
+	managedByValue         = "ada"
+	sandboxNameLabel       = "ada.io/sandbox"
+	repoAnnotation         = "ada.io/repo"
+	accessAnnotation       = "ada.io/access"
+	harnessAnnotation      = "ada.io/harness"
+	spotAnnotation         = "ada.io/spot"
+	podNameAnnotation      = "agents.x-k8s.io/pod-name"
+	gkeSpotNodeSelectorKey = "cloud.google.com/gke-spot"
 )
 
 func PodName(sb *Sandbox) string {
@@ -35,6 +38,10 @@ func Repo(sb *Sandbox) string {
 
 func Harness(sb *Sandbox) string {
 	return sb.Annotations[harnessAnnotation]
+}
+
+func Spot(sb *Sandbox) bool {
+	return sb.Annotations[spotAnnotation] == "true"
 }
 
 func GenerateName(repo string) (string, error) {
@@ -85,6 +92,9 @@ func buildSandbox(cfg Config, sandboxName, secretName string, expiresAt time.Tim
 	if cfg.Harness != "" {
 		annotations[harnessAnnotation] = cfg.Harness
 	}
+	if cfg.Spot {
+		annotations[spotAnnotation] = "true"
+	}
 
 	podSpec := corev1.PodSpec{
 		AutomountServiceAccountToken: ptr.To(false),
@@ -95,6 +105,10 @@ func buildSandbox(cfg Config, sandboxName, secretName string, expiresAt time.Tim
 				Image:      cfg.Image,
 				WorkingDir: "/workspace",
 				Env:        buildEnv(cfg, sandboxName, secretName),
+				Resources:  buildResources(cfg),
+				SecurityContext: &corev1.SecurityContext{
+					AllowPrivilegeEscalation: ptr.To(false),
+				},
 				// entrypoint.sh touches /tmp/ada-ready once harness setup and git clone finish.
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
@@ -109,6 +123,11 @@ func buildSandbox(cfg Config, sandboxName, secretName string, expiresAt time.Tim
 	}
 	if cfg.RuntimeClass != "" {
 		podSpec.RuntimeClassName = ptr.To(cfg.RuntimeClass)
+	}
+	if cfg.Spot {
+		podSpec.NodeSelector = map[string]string{
+			gkeSpotNodeSelectorKey: "true",
+		}
 	}
 
 	return &Sandbox{
@@ -182,4 +201,24 @@ func buildEnv(cfg Config, sandboxName, secretName string) []corev1.EnvVar {
 		corev1.EnvVar{Name: "GOOGLE_GEMINI_BASE_URL", Value: cfg.GatewayURL + "/google"},
 	)
 	return env
+}
+
+func buildResources(cfg Config) corev1.ResourceRequirements {
+	resources := corev1.ResourceList{}
+	if cfg.CPU != "" {
+		resources[corev1.ResourceCPU] = resource.MustParse(cfg.CPU)
+	}
+	if cfg.Memory != "" {
+		resources[corev1.ResourceMemory] = resource.MustParse(cfg.Memory)
+	}
+	if cfg.EphemeralStorage != "" {
+		resources[corev1.ResourceEphemeralStorage] = resource.MustParse(cfg.EphemeralStorage)
+	}
+	if len(resources) == 0 {
+		return corev1.ResourceRequirements{}
+	}
+	return corev1.ResourceRequirements{
+		Requests: resources,
+		Limits:   resources.DeepCopy(),
+	}
 }

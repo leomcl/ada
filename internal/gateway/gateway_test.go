@@ -369,6 +369,29 @@ func TestProxiesModelRoutesAndReplacesAuthHeader(t *testing.T) {
 	}
 }
 
+func TestRejectsDisallowedModelRoutesAndMethods(t *testing.T) {
+	h := newTestHarness(t)
+	cases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/anthropic/v0/management/config"},
+		{http.MethodPost, "/google/admin/oauth"},
+		{http.MethodDelete, "/v1/models"},
+		{http.MethodPut, "/anthropic/v1/messages"},
+		{http.MethodGet, "/anthropic/v1/..%5cv0/management"},
+	}
+
+	for _, tc := range cases {
+		if status := h.do(t, tc.method, tc.path, nil); status != http.StatusForbidden {
+			t.Fatalf("expected 403 for %s %s, got %d", tc.method, tc.path, status)
+		}
+	}
+	if len(h.cliproxyUpstream.recorded()) != 0 {
+		t.Fatal("upstream should not receive disallowed model requests")
+	}
+}
+
 func TestScopesGitHubAPIRouteAndInjectsPAT(t *testing.T) {
 	h := newTestHarness(t)
 

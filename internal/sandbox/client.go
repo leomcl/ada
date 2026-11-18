@@ -37,6 +37,7 @@ type Summary struct {
 	Repo      string
 	Access    string
 	Harness   string
+	Spot      bool
 	Ready     string
 	Reason    string
 	CreatedAt time.Time
@@ -241,6 +242,7 @@ func (c *Client) List(ctx context.Context, namespace string) ([]Summary, error) 
 			Repo:      Repo(sb),
 			Access:    sb.Annotations[accessAnnotation],
 			Harness:   Harness(sb),
+			Spot:      Spot(sb),
 			Ready:     readyStatus,
 			Reason:    readyReason,
 			CreatedAt: sb.CreationTimestamp.Time,
