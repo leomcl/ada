@@ -96,19 +96,17 @@ spec:
           livenessProbe:
             exec:
               command:
-                - nc
-                - -z
-                - 127.0.0.1
-                - "8317"
+                - bash
+                - -c
+                - exec 3<>/dev/tcp/127.0.0.1/8317
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             exec:
               command:
-                - nc
-                - -z
-                - 127.0.0.1
-                - "8317"
+                - bash
+                - -c
+                - exec 3<>/dev/tcp/127.0.0.1/8317
             initialDelaySeconds: 2
             periodSeconds: 5
           volumeMounts:
