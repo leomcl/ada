@@ -17,6 +17,25 @@ spec:
     requests:
       storage: 1Gi
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ada-gateway-config
+  namespace: ada-system
+data:
+  gateway.yaml: |
+    listenAddr: ":8080"
+    cliproxy:
+      enabled: true
+      baseURL: http://127.0.0.1:8317
+    providers:
+      openai:
+        upstreamURL: https://api.openai.com
+      anthropic:
+        upstreamURL: https://api.anthropic.com
+      google:
+        upstreamURL: https://generativelanguage.googleapis.com
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,10 +63,6 @@ spec:
             - name: http
               containerPort: 8080
           env:
-            - name: ADA_LISTEN_ADDR
-              value: ":8080"
-            - name: CLIPROXY_BASE_URL
-              value: "http://127.0.0.1:8317"
             - name: ADA_SIGNING_KEY
               valueFrom:
                 secretKeyRef:
@@ -63,6 +78,30 @@ spec:
                 secretKeyRef:
                   name: ada-gateway-secrets
                   key: cliproxy-api-key
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ada-gateway-secrets
+                  key: openai-api-key
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ada-gateway-secrets
+                  key: anthropic-api-key
+                  optional: true
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ada-gateway-secrets
+                  key: gemini-api-key
+                  optional: true
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/ada/gateway.yaml
+              subPath: gateway.yaml
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /healthz
@@ -131,6 +170,9 @@ spec:
               cpu: 125m
               memory: 256Mi
       volumes:
+        - name: gateway-config
+          configMap:
+            name: ada-gateway-config
         - name: cliproxy-config
           secret:
             secretName: ada-gateway-secrets
