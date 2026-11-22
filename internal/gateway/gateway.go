@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -43,50 +45,64 @@ var allowedGitHubAPIWrites = []struct {
 	{http.MethodPost, "issues/*/comments"},
 }
 
-var modelRoutePrefixes = []string{"/anthropic", "/google"}
-
 type Config struct {
-	SigningKey       []byte
-	GitHubPAT        string
-	GitHubBaseURL    string
-	GitHubAPIBaseURL string
-	CLIProxyBaseURL  string
-	CLIProxyAPIKey   string
+	Settings    Settings
+	Secrets     Secrets
+	AuditLogger *slog.Logger
 }
 
 type gateway struct {
-	cfg            Config
+	signingKey     []byte
+	auditLogger    *slog.Logger
 	githubProxy    *httputil.ReverseProxy
 	githubAPIProxy *httputil.ReverseProxy
-	cliproxyProxy  *httputil.ReverseProxy
+}
+
+type providerRoute struct {
+	name        string
+	pattern     string
+	routePrefix string
+	upstreamURL string
+	apiKey      string
+	authHeader  string
+	authPrefix  string
 }
 
 func NewHandler(cfg Config) (http.Handler, error) {
-	signingKey, err := token.ParseSigningKey(cfg.SigningKey)
+	signingKey, err := token.ParseSigningKey(cfg.Secrets.SigningKey)
 	if err != nil {
 		return nil, err
 	}
-	cfg.SigningKey = signingKey
-	cfg.GitHubPAT = strings.TrimSpace(cfg.GitHubPAT)
-	cfg.CLIProxyAPIKey = strings.TrimSpace(cfg.CLIProxyAPIKey)
+	settings := cfg.Settings.withDefaults()
+	secrets := cfg.Secrets.trimmed()
 
-	githubURL, err := parseUpstreamURL(cfg.GitHubBaseURL)
+	githubURL, err := parseUpstreamURL(settings.GitHub.BaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid GitHubBaseURL: %w", err)
+		return nil, fmt.Errorf("invalid github.baseURL: %w", err)
 	}
-	githubAPIURL, err := parseUpstreamURL(cfg.GitHubAPIBaseURL)
+	githubAPIURL, err := parseUpstreamURL(settings.GitHub.APIBaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid GitHubAPIBaseURL: %w", err)
-	}
-	cliproxyURL, err := parseUpstreamURL(cfg.CLIProxyBaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CLIProxyBaseURL: %w", err)
+		return nil, fmt.Errorf("invalid github.apiBaseURL: %w", err)
 	}
 
-	gitBasicAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+cfg.GitHubPAT))
+	var cliproxyURL *url.URL
+	if settings.CLIProxy.Enabled {
+		cliproxyURL, err = parseUpstreamURL(settings.CLIProxy.BaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cliproxy.baseURL: %w", err)
+		}
+	}
+
+	auditLogger := cfg.AuditLogger
+	if auditLogger == nil {
+		auditLogger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	}
+
+	gitBasicAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+secrets.GitHubPAT))
 
 	gw := &gateway{
-		cfg: cfg,
+		signingKey:  signingKey,
+		auditLogger: auditLogger,
 		githubProxy: newReverseProxy(func(pr *httputil.ProxyRequest) {
 			owner := pr.In.PathValue("owner")
 			repo := pr.In.PathValue("repo")
@@ -105,16 +121,9 @@ func NewHandler(cfg Config) (http.Handler, error) {
 			}
 			setTargetPath(pr, githubAPIURL, targetPath)
 			stripClientAuthHeaders(pr.Out.Header)
-			pr.Out.Header.Set("Authorization", "Bearer "+cfg.GitHubPAT)
+			pr.Out.Header.Set("Authorization", "Bearer "+secrets.GitHubPAT)
 			if pr.Out.Header.Get("User-Agent") == "" {
 				pr.Out.Header.Set("User-Agent", "ada-gateway")
-			}
-		}),
-		cliproxyProxy: newReverseProxy(func(pr *httputil.ProxyRequest) {
-			setTargetPath(pr, cliproxyURL, modelUpstreamPath(pr.In.URL.Path))
-			stripClientAuthHeaders(pr.Out.Header)
-			if cfg.CLIProxyAPIKey != "" {
-				pr.Out.Header.Set("Authorization", "Bearer "+cfg.CLIProxyAPIKey)
 			}
 		}),
 	}
@@ -126,9 +135,58 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("/github/{owner}/{repo}/{path...}", gw.handleGitHubGit)
 	mux.HandleFunc("/github-api/repos/{owner}/{repo}", gw.handleGitHubAPI)
 	mux.HandleFunc("/github-api/repos/{owner}/{repo}/{path...}", gw.handleGitHubAPI)
-	mux.HandleFunc("/v1/{path...}", gw.handleModelProxy)
-	for _, prefix := range modelRoutePrefixes {
-		mux.HandleFunc(prefix+"/{path...}", gw.handleModelProxy)
+
+	providers := []providerRoute{
+		{
+			name:        "openai",
+			pattern:     "/v1/{path...}",
+			upstreamURL: settings.Providers.OpenAI.UpstreamURL,
+			apiKey:      secrets.OpenAIAPIKey,
+			authHeader:  "Authorization",
+			authPrefix:  "Bearer ",
+		},
+		{
+			name:        "anthropic",
+			pattern:     "/anthropic/{path...}",
+			routePrefix: "/anthropic",
+			upstreamURL: settings.Providers.Anthropic.UpstreamURL,
+			apiKey:      secrets.AnthropicAPIKey,
+			authHeader:  "x-api-key",
+		},
+		{
+			name:        "google",
+			pattern:     "/google/{path...}",
+			routePrefix: "/google",
+			upstreamURL: settings.Providers.Google.UpstreamURL,
+			apiKey:      secrets.GoogleAPIKey,
+			authHeader:  "x-goog-api-key",
+		},
+	}
+
+	for _, p := range providers {
+		upstreamURL, err := parseUpstreamURL(p.upstreamURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid providers.%s.upstreamURL: %w", p.name, err)
+		}
+		var proxy *httputil.ReverseProxy
+		switch {
+		case p.apiKey != "":
+			authValue := p.authPrefix + p.apiKey
+			proxy = newReverseProxy(func(pr *httputil.ProxyRequest) {
+				setTargetPath(pr, upstreamURL, stripRoutePrefix(pr.In.URL.Path, p.routePrefix))
+				stripClientAuthHeaders(pr.Out.Header)
+				pr.Out.Header.Set(p.authHeader, authValue)
+			})
+		case cliproxyURL != nil:
+			proxy = newReverseProxy(func(pr *httputil.ProxyRequest) {
+				setTargetPath(pr, cliproxyURL, stripRoutePrefix(pr.In.URL.Path, p.routePrefix))
+				stripClientAuthHeaders(pr.Out.Header)
+				if secrets.CLIProxyAPIKey != "" {
+					pr.Out.Header.Set("Authorization", "Bearer "+secrets.CLIProxyAPIKey)
+				}
+			})
+		}
+		mux.HandleFunc(p.pattern, gw.handleModelProxy(p.name, p.routePrefix, proxy))
 	}
 
 	return mux, nil
@@ -147,7 +205,18 @@ func (gw *gateway) handleGitHubGit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid repository path", http.StatusBadRequest)
 		return
 	}
-	if claims.Repo != owner+"/"+strings.TrimSuffix(repo, ".git") {
+	targetRepo := owner + "/" + strings.TrimSuffix(repo, ".git")
+	isPush := r.Method == http.MethodPost && rest == "git-receive-pack"
+	if claims.Repo != targetRepo {
+		if isPush {
+			gw.logGitPushAudit(gitPushAudit{
+				Decision: "deny",
+				Reason:   "forbidden_repo",
+				Sandbox:  claims.JTI,
+				Repo:     targetRepo,
+				Status:   http.StatusForbidden,
+			})
+		}
 		http.Error(w, "forbidden repository", http.StatusForbidden)
 		return
 	}
@@ -156,20 +225,53 @@ func (gw *gateway) handleGitHubGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if rest == "git-receive-pack" {
-		commands, err := readReceivePackCommands(r.Body)
+	if isPush {
+		commands, updates, err := readReceivePackCommands(r.Body)
 		if err != nil {
-			status := http.StatusBadRequest
-			if errors.Is(err, errProtectedRef) {
-				status = http.StatusForbidden
-			}
-			http.Error(w, err.Error(), status)
+			gw.logGitPushAudit(gitPushAudit{
+				Decision: "deny",
+				Reason:   "malformed_receive_pack",
+				Sandbox:  claims.JTI,
+				Repo:     targetRepo,
+				Status:   http.StatusBadRequest,
+			})
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		for _, update := range updates {
+			if protectedRefs[update.Ref] {
+				gw.logGitPushAudit(gitPushAudit{
+					Decision: "deny",
+					Reason:   "protected_ref",
+					Sandbox:  claims.JTI,
+					Repo:     targetRepo,
+					Update:   update,
+					Status:   http.StatusForbidden,
+				})
+				http.Error(w, fmt.Sprintf("%s: %s", errProtectedRef, update.Ref), http.StatusForbidden)
+				return
+			}
+		}
+
 		r.Body = struct {
 			io.Reader
 			io.Closer
 		}{io.MultiReader(bytes.NewReader(commands), r.Body), r.Body}
+
+		rec := &statusRecorder{ResponseWriter: w}
+		defer func() {
+			for _, update := range updates {
+				gw.logGitPushAudit(gitPushAudit{
+					Decision: "allow",
+					Sandbox:  claims.JTI,
+					Repo:     targetRepo,
+					Update:   update,
+					Status:   rec.status,
+				})
+			}
+		}()
+		gw.githubProxy.ServeHTTP(rec, r)
+		return
 	}
 
 	gw.githubProxy.ServeHTTP(w, r)
@@ -188,28 +290,74 @@ func (gw *gateway) handleGitHubAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid repository path", http.StatusBadRequest)
 		return
 	}
-	if claims.Repo != owner+"/"+repo {
+	targetRepo := owner + "/" + repo
+	isWrite := r.Method != http.MethodGet && r.Method != http.MethodHead
+	if claims.Repo != targetRepo {
+		if isWrite {
+			gw.logGitHubAPIWriteAudit(githubAPIWriteAudit{
+				Decision: "deny",
+				Reason:   "forbidden_repo",
+				Sandbox:  claims.JTI,
+				Repo:     targetRepo,
+				Method:   r.Method,
+				Path:     rest,
+				Status:   http.StatusForbidden,
+			})
+		}
 		http.Error(w, "forbidden repository", http.StatusForbidden)
 		return
 	}
 	if !githubAPIAllowed(r.Method, rest) {
+		if isWrite {
+			gw.logGitHubAPIWriteAudit(githubAPIWriteAudit{
+				Decision: "deny",
+				Reason:   "forbidden_operation",
+				Sandbox:  claims.JTI,
+				Repo:     targetRepo,
+				Method:   r.Method,
+				Path:     rest,
+				Status:   http.StatusForbidden,
+			})
+		}
 		http.Error(w, "forbidden github api operation", http.StatusForbidden)
+		return
+	}
+
+	if isWrite {
+		rec := &statusRecorder{ResponseWriter: w}
+		defer func() {
+			gw.logGitHubAPIWriteAudit(githubAPIWriteAudit{
+				Decision: "allow",
+				Sandbox:  claims.JTI,
+				Repo:     targetRepo,
+				Method:   r.Method,
+				Path:     rest,
+				Status:   rec.status,
+			})
+		}()
+		gw.githubAPIProxy.ServeHTTP(rec, r)
 		return
 	}
 
 	gw.githubAPIProxy.ServeHTTP(w, r)
 }
 
-func (gw *gateway) handleModelProxy(w http.ResponseWriter, r *http.Request) {
-	if _, ok := gw.authenticate(w, r); !ok {
-		return
-	}
-	if !modelOperationAllowed(r.Method, r.URL.Path) {
-		http.Error(w, "forbidden model operation", http.StatusForbidden)
-		return
-	}
+func (gw *gateway) handleModelProxy(provider, routePrefix string, proxy *httputil.ReverseProxy) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := gw.authenticate(w, r); !ok {
+			return
+		}
+		if !modelOperationAllowed(r.Method, r.URL.Path, routePrefix) {
+			http.Error(w, "forbidden model operation", http.StatusForbidden)
+			return
+		}
+		if proxy == nil {
+			http.Error(w, provider+" model provider is not configured", http.StatusServiceUnavailable)
+			return
+		}
 
-	gw.cliproxyProxy.ServeHTTP(w, r)
+		proxy.ServeHTTP(w, r)
+	}
 }
 
 func (gw *gateway) authenticate(w http.ResponseWriter, r *http.Request) (token.SandboxTokenClaims, bool) {
@@ -220,7 +368,7 @@ func (gw *gateway) authenticate(w http.ResponseWriter, r *http.Request) (token.S
 		return token.SandboxTokenClaims{}, false
 	}
 
-	claims, err := token.VerifySandboxToken(rawToken, gw.cfg.SigningKey, time.Now())
+	claims, err := token.VerifySandboxToken(rawToken, gw.signingKey, time.Now())
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="ada-gateway"`)
 		http.Error(w, "invalid sandbox token", http.StatusUnauthorized)
@@ -276,66 +424,70 @@ func githubAPIAllowed(method, rest string) bool {
 	return false
 }
 
-func modelOperationAllowed(method, requestPath string) bool {
+func modelOperationAllowed(method, requestPath, routePrefix string) bool {
 	if method != http.MethodGet && method != http.MethodPost {
 		return false
 	}
-	upstreamPath := modelUpstreamPath(requestPath)
+	upstreamPath := stripRoutePrefix(requestPath, routePrefix)
 	if !validRelativePath(strings.TrimPrefix(upstreamPath, "/")) {
 		return false
 	}
 	return strings.HasPrefix(upstreamPath, "/v1/") || strings.HasPrefix(upstreamPath, "/v1beta/")
 }
 
-func modelUpstreamPath(requestPath string) string {
-	for _, prefix := range modelRoutePrefixes {
-		if rest, ok := strings.CutPrefix(requestPath, prefix+"/"); ok {
-			return "/" + rest
-		}
+func stripRoutePrefix(requestPath, routePrefix string) string {
+	if routePrefix == "" {
+		return requestPath
+	}
+	if rest, ok := strings.CutPrefix(requestPath, routePrefix+"/"); ok {
+		return "/" + rest
 	}
 	return requestPath
 }
 
-func readReceivePackCommands(body io.Reader) ([]byte, error) {
+func readReceivePackCommands(body io.Reader) ([]byte, []receivePackUpdate, error) {
 	var consumed bytes.Buffer
+	var updates []receivePackUpdate
 	for {
 		var lenHex [4]byte
 		if _, err := io.ReadFull(body, lenHex[:]); err != nil {
-			return nil, fmt.Errorf("%w: truncated pkt-line length", errMalformedReceivePack)
+			return nil, nil, fmt.Errorf("%w: truncated pkt-line length", errMalformedReceivePack)
 		}
 		consumed.Write(lenHex[:])
 
 		pktLen, err := strconv.ParseUint(string(lenHex[:]), 16, 16)
 		if err != nil {
-			return nil, fmt.Errorf("%w: invalid pkt-line length", errMalformedReceivePack)
+			return nil, nil, fmt.Errorf("%w: invalid pkt-line length", errMalformedReceivePack)
 		}
 		if pktLen == 0 {
-			return consumed.Bytes(), nil
+			return consumed.Bytes(), updates, nil
 		}
 		if pktLen < 4 {
-			return nil, fmt.Errorf("%w: invalid pkt-line length", errMalformedReceivePack)
+			return nil, nil, fmt.Errorf("%w: invalid pkt-line length", errMalformedReceivePack)
 		}
 		if consumed.Len()+int(pktLen) > maxReceivePackCommandBytes {
-			return nil, fmt.Errorf("%w: command section too large", errMalformedReceivePack)
+			return nil, nil, fmt.Errorf("%w: command section too large", errMalformedReceivePack)
 		}
 
 		payload := make([]byte, pktLen-4)
 		if _, err := io.ReadFull(body, payload); err != nil {
-			return nil, fmt.Errorf("%w: truncated pkt-line payload", errMalformedReceivePack)
+			return nil, nil, fmt.Errorf("%w: truncated pkt-line payload", errMalformedReceivePack)
 		}
 		consumed.Write(payload)
 
 		command, _, _ := bytes.Cut(payload, []byte{0})
 		if !utf8.Valid(command) {
-			return nil, fmt.Errorf("%w: non-utf8 command", errMalformedReceivePack)
+			return nil, nil, fmt.Errorf("%w: non-utf8 command", errMalformedReceivePack)
 		}
 		fields := strings.Fields(string(command))
 		if len(fields) < 3 {
-			return nil, fmt.Errorf("%w: expected <old> <new> <ref>", errMalformedReceivePack)
+			return nil, nil, fmt.Errorf("%w: expected <old> <new> <ref>", errMalformedReceivePack)
 		}
-		if refName := fields[2]; protectedRefs[refName] {
-			return nil, fmt.Errorf("%w: %s", errProtectedRef, refName)
-		}
+		updates = append(updates, receivePackUpdate{
+			OldOID: fields[0],
+			NewOID: fields[1],
+			Ref:    fields[2],
+		})
 	}
 }
 
@@ -366,8 +518,8 @@ func parseUpstreamURL(raw string) (*url.URL, error) {
 	if err != nil {
 		return nil, err
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("url %q must include scheme and host", raw)
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("url %q must use http or https scheme with host", raw)
 	}
 	return u, nil
 }
