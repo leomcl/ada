@@ -18,8 +18,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-
-	"github.com/leomcl/ada/internal/token"
 )
 
 const readyPollInterval = time.Second
@@ -82,19 +80,6 @@ func loadKubeConfig() (*rest.Config, error) {
 	return nil, fmt.Errorf("load kubeconfig: %w", err)
 }
 
-func (c *Client) resolveSigningKey(ctx context.Context, systemNamespace, secretName string) ([]byte, error) {
-	secret, err := c.kube.CoreV1().Secrets(systemNamespace).Get(ctx, secretName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("get signing key secret %s/%s: %w", systemNamespace, secretName, err)
-	}
-
-	key, err := token.ParseSigningKey(secret.Data[signingKeySecretKey])
-	if err != nil {
-		return nil, fmt.Errorf("signing key secret %s/%s key %q: %w", systemNamespace, secretName, signingKeySecretKey, err)
-	}
-	return key, nil
-}
-
 func (c *Client) Create(ctx context.Context, cfg Config) (*Sandbox, error) {
 	cfg.normalize()
 	if err := cfg.validate(); err != nil {
@@ -109,72 +94,54 @@ func (c *Client) Create(ctx context.Context, cfg Config) (*Sandbox, error) {
 			return nil, err
 		}
 	}
-	secretName := sandboxName + "-token"
 
-	signingKey, err := c.resolveSigningKey(ctx, cfg.SystemNamespace, cfg.SigningKeySecret)
+	expiresAt := time.Now().UTC().Add(cfg.TTL.Duration)
+	sandboxObj := buildSandbox(cfg, sandboxName, expiresAt)
+	unstructuredSandbox, err := ToUnstructured(sandboxObj)
 	if err != nil {
 		return nil, err
 	}
 
-	now := time.Now().UTC()
-	expiresAt := now.Add(cfg.TTL.Duration)
-	mintedToken, err := token.MintSandboxToken(token.SandboxTokenClaims{
-		JTI:       sandboxName,
-		Repo:      cfg.Repo,
-		IssuedAt:  now.Unix(),
-		ExpiresAt: expiresAt.Unix(),
-	}, signingKey)
-	if err != nil {
-		return nil, fmt.Errorf("mint sandbox token: %w", err)
-	}
-
-	sandboxObj := buildSandbox(cfg, sandboxName, secretName, expiresAt)
-	unstructuredSandbox, err := toUnstructured(sandboxObj)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create the Sandbox first so its UID can own the Secret; the pod waits until the Secret exists.
 	createdUnstructured, err := c.dynamic.Resource(SandboxGVR).Namespace(cfg.Namespace).Create(ctx, unstructuredSandbox, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox %s/%s: %w", cfg.Namespace, sandboxName, err)
 	}
 
-	createdSandbox, err := fromUnstructured(createdUnstructured)
+	createdSandbox, err := FromUnstructured(createdUnstructured)
 	if err != nil {
 		return nil, err
 	}
 
-	secretData := map[string][]byte{
-		"token": []byte(mintedToken),
-	}
 	if cfg.TailscaleAuthKey != "" {
-		secretData["ts-authkey"] = []byte(cfg.TailscaleAuthKey)
-	}
-
-	secretObj := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: cfg.Namespace,
-			Labels: map[string]string{
-				managedByLabel:   managedByValue,
-				sandboxNameLabel: sandboxName,
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: SandboxGroupVersion.String(),
-					Kind:       SandboxKind,
-					Name:       createdSandbox.Name,
-					UID:        createdSandbox.UID,
+		secretName := TailscaleSecretName(sandboxName)
+		secretObj := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: cfg.Namespace,
+				Labels: map[string]string{
+					ManagedByLabel:   ManagedByValue,
+					SandboxNameLabel: sandboxName,
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: SandboxGroupVersion.String(),
+						Kind:       SandboxKind,
+						Name:       createdSandbox.Name,
+						UID:        createdSandbox.UID,
+					},
 				},
 			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: secretData,
-	}
-	if _, err := c.kube.CoreV1().Secrets(cfg.Namespace).Create(ctx, secretObj, metav1.CreateOptions{}); err != nil {
-		_ = c.Delete(context.WithoutCancel(ctx), cfg.Namespace, sandboxName)
-		return nil, fmt.Errorf("create token secret %s/%s: %w", cfg.Namespace, secretName, err)
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				TailscaleSecretKey: []byte(cfg.TailscaleAuthKey),
+			},
+		}
+		if _, err := c.kube.CoreV1().Secrets(cfg.Namespace).Create(ctx, secretObj, metav1.CreateOptions{}); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			_ = c.Delete(cleanupCtx, cfg.Namespace, sandboxName)
+			return nil, fmt.Errorf("create tailscale secret %s/%s: %w", cfg.Namespace, secretName, err)
+		}
 	}
 
 	return createdSandbox, nil
@@ -213,12 +180,12 @@ func (c *Client) Get(ctx context.Context, namespace, name string) (*Sandbox, err
 	if err != nil {
 		return nil, fmt.Errorf("get sandbox %s/%s: %w", namespace, name, err)
 	}
-	return fromUnstructured(u)
+	return FromUnstructured(u)
 }
 
 func (c *Client) List(ctx context.Context, namespace string) ([]Summary, error) {
 	list, err := c.dynamic.Resource(SandboxGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: managedByLabel + "=" + managedByValue,
+		LabelSelector: ManagedBySelector,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list sandboxes in %s: %w", namespace, err)
@@ -226,7 +193,7 @@ func (c *Client) List(ctx context.Context, namespace string) ([]Summary, error) 
 
 	summaries := make([]Summary, 0, len(list.Items))
 	for i := range list.Items {
-		sb, err := fromUnstructured(&list.Items[i])
+		sb, err := FromUnstructured(&list.Items[i])
 		if err != nil {
 			return nil, err
 		}
@@ -262,7 +229,7 @@ func (c *Client) Delete(ctx context.Context, namespace, name string) error {
 	return nil
 }
 
-func toUnstructured(sb *Sandbox) (*unstructured.Unstructured, error) {
+func ToUnstructured(sb *Sandbox) (*unstructured.Unstructured, error) {
 	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(sb)
 	if err != nil {
 		return nil, fmt.Errorf("convert sandbox to unstructured: %w", err)
@@ -270,7 +237,7 @@ func toUnstructured(sb *Sandbox) (*unstructured.Unstructured, error) {
 	return &unstructured.Unstructured{Object: obj}, nil
 }
 
-func fromUnstructured(u *unstructured.Unstructured) (*Sandbox, error) {
+func FromUnstructured(u *unstructured.Unstructured) (*Sandbox, error) {
 	var sb Sandbox
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &sb); err != nil {
 		return nil, fmt.Errorf("convert unstructured to sandbox: %w", err)

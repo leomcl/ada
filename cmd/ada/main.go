@@ -19,7 +19,7 @@ import (
 
 const (
 	tokenUsage = "usage: ada token <owner/repo> [--ttl 12h] [--jti <sandbox-name>]  (key from ADA_SIGNING_KEY)"
-	upUsage    = "usage: ada up [owner/repo] [--access rex|tty|headless] [--harness opencode|claude|agy|\"\"] [--image <image>] [--namespace <ns>] [--system-namespace <ns>] [--signing-key-secret <name>] [--gateway <url>] [--runtime-class <name>] [--cpu 2] [--memory 4Gi] [--ephemeral-storage 10Gi] [--spot] [--ttl 12h] [--tailscale-authkey <key>] [--wait=true] [--no-connect]"
+	upUsage    = "usage: ada up [owner/repo] [--access rex|tty|headless] [--harness opencode|claude|agy|\"\"] [--image <image>] [--namespace <ns>] [--gateway <url>] [--runtime-class <name>] [--cpu 2] [--memory 4Gi] [--ephemeral-storage 10Gi] [--spot] [--ttl 12h] [--tailscale-authkey <key>] [--wait=true] [--no-connect]"
 	lsUsage    = "usage: ada ls [--namespace <ns>]"
 	downUsage  = "usage: ada down <name> [--namespace <ns>]"
 	sshUsage   = "usage: ada ssh <name> [--namespace <ns>] [-- command...]  (runs kubectl exec)"
@@ -97,8 +97,6 @@ func newUpFlags(cfg *sandbox.Config) (*flag.FlagSet, *upOptions) {
 	fs.StringVar(&cfg.Harness, "harness", cfg.Harness, "coding harness: opencode, claude, agy, or empty")
 	fs.StringVar(&cfg.Image, "image", cfg.Image, "sandbox container image")
 	fs.StringVar(&cfg.Namespace, "namespace", cfg.Namespace, "workload namespace")
-	fs.StringVar(&cfg.SystemNamespace, "system-namespace", cfg.SystemNamespace, "system namespace holding signing key secret")
-	fs.StringVar(&cfg.SigningKeySecret, "signing-key-secret", cfg.SigningKeySecret, "secret name holding signing key")
 	fs.StringVar(&cfg.GatewayURL, "gateway", cfg.GatewayURL, "ada-gateway base URL")
 	fs.StringVar(&cfg.RuntimeClass, "runtime-class", cfg.RuntimeClass, "Kubernetes RuntimeClassName (empty for none)")
 	fs.StringVar(&cfg.CPU, "cpu", cfg.CPU, "container CPU request and limit")

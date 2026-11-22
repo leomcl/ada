@@ -27,6 +27,14 @@ type githubAPIWriteAudit struct {
 	Status   int
 }
 
+type sandboxDeleteAudit struct {
+	Decision string
+	Reason   string
+	Sandbox  string
+	Repo     string
+	Status   int
+}
+
 func (gw *gateway) logGitPushAudit(a gitPushAudit) {
 	attrs := []any{
 		"event", "git_push",
@@ -58,6 +66,20 @@ func (gw *gateway) logGitHubAPIWriteAudit(a githubAPIWriteAudit) {
 		"repo", a.Repo,
 		"method", a.Method,
 		"path", a.Path,
+		"status", a.Status,
+	}
+	if a.Reason != "" {
+		attrs = append(attrs, "reason", a.Reason)
+	}
+	gw.auditLogger.Info("audit", attrs...)
+}
+
+func (gw *gateway) logSandboxDeleteAudit(a sandboxDeleteAudit) {
+	attrs := []any{
+		"event", "sandbox_delete",
+		"decision", a.Decision,
+		"sandbox", a.Sandbox,
+		"repo", a.Repo,
 		"status", a.Status,
 	}
 	if a.Reason != "" {

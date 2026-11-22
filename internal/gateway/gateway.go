@@ -18,6 +18,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"github.com/leomcl/ada/internal/token"
 )
 
@@ -49,11 +51,13 @@ type Config struct {
 	Settings    Settings
 	Secrets     Secrets
 	AuditLogger *slog.Logger
+	Sandboxes   SandboxStore
 }
 
 type gateway struct {
 	signingKey     []byte
 	auditLogger    *slog.Logger
+	sandboxes      SandboxStore
 	githubProxy    *httputil.ReverseProxy
 	githubAPIProxy *httputil.ReverseProxy
 }
@@ -103,6 +107,7 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	gw := &gateway{
 		signingKey:  signingKey,
 		auditLogger: auditLogger,
+		sandboxes:   cfg.Sandboxes,
 		githubProxy: newReverseProxy(func(pr *httputil.ProxyRequest) {
 			owner := pr.In.PathValue("owner")
 			repo := pr.In.PathValue("repo")
@@ -129,9 +134,17 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "ok")
 	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		if gw.sandboxes != nil && !gw.sandboxes.HasSynced() {
+			http.Error(w, "sandbox informer not synced", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	})
+	mux.HandleFunc("DELETE /sandbox/self", gw.handleDeleteSelf)
 	mux.HandleFunc("/github/{owner}/{repo}/{path...}", gw.handleGitHubGit)
 	mux.HandleFunc("/github-api/repos/{owner}/{repo}", gw.handleGitHubAPI)
 	mux.HandleFunc("/github-api/repos/{owner}/{repo}/{path...}", gw.handleGitHubAPI)
@@ -360,7 +373,53 @@ func (gw *gateway) handleModelProxy(provider, routePrefix string, proxy *httputi
 	}
 }
 
+func (gw *gateway) handleDeleteSelf(w http.ResponseWriter, r *http.Request) {
+	claims, ok := gw.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if gw.sandboxes == nil {
+		http.Error(w, "sandbox controller is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	if err := gw.sandboxes.Delete(r.Context(), claims.JTI); err != nil {
+		status := http.StatusInternalServerError
+		reason := "delete_failed"
+		msg := "failed to delete sandbox"
+		if apierrors.IsNotFound(err) {
+			status = http.StatusNotFound
+			reason = "not_found"
+			msg = "sandbox not found"
+		} else {
+			log.Printf("delete sandbox %s failed: %v", claims.JTI, err)
+		}
+		gw.logSandboxDeleteAudit(sandboxDeleteAudit{
+			Decision: "error",
+			Reason:   reason,
+			Sandbox:  claims.JTI,
+			Repo:     claims.Repo,
+			Status:   status,
+		})
+		http.Error(w, msg, status)
+		return
+	}
+
+	gw.logSandboxDeleteAudit(sandboxDeleteAudit{
+		Decision: "allow",
+		Sandbox:  claims.JTI,
+		Repo:     claims.Repo,
+		Status:   http.StatusNoContent,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (gw *gateway) authenticate(w http.ResponseWriter, r *http.Request) (token.SandboxTokenClaims, bool) {
+	if gw.sandboxes != nil && !gw.sandboxes.HasSynced() {
+		http.Error(w, "gateway not ready", http.StatusServiceUnavailable)
+		return token.SandboxTokenClaims{}, false
+	}
+
 	rawToken := extractSandboxToken(r)
 	if rawToken == "" {
 		w.Header().Set("WWW-Authenticate", `Basic realm="ada-gateway"`)
@@ -372,6 +431,12 @@ func (gw *gateway) authenticate(w http.ResponseWriter, r *http.Request) (token.S
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="ada-gateway"`)
 		http.Error(w, "invalid sandbox token", http.StatusUnauthorized)
+		return token.SandboxTokenClaims{}, false
+	}
+
+	if gw.sandboxes != nil && (claims.JTI == "" || !gw.sandboxes.IsActive(claims.JTI, claims.Repo)) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="ada-gateway"`)
+		http.Error(w, "sandbox is not active", http.StatusUnauthorized)
 		return token.SandboxTokenClaims{}, false
 	}
 
