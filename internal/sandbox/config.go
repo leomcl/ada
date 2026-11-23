@@ -10,18 +10,16 @@ import (
 )
 
 const (
-	defaultWorkloadNamespace    = "agent-sandbox-workloads"
-	defaultSystemNamespace      = "ada-system"
-	defaultSigningKeySecretName = "ada-signing-key"
-	signingKeySecretKey         = "signing-key"
-	defaultBaseImage            = "ada-base:latest"
-	defaultGatewayURL           = "http://ada-gateway.ada-system.svc:8080"
-	defaultRuntimeClassName     = "gvisor"
-	defaultAccessMode           = "tty"
-	defaultCPU                  = "2"
-	defaultMemory               = "4Gi"
-	defaultEphemeralStorage     = "10Gi"
-	defaultTokenTTL             = 12 * time.Hour
+	DefaultWorkloadsNamespace = "agent-sandbox-workloads"
+	DefaultTokenTTL           = 12 * time.Hour
+
+	defaultBaseImage        = "ada-base:latest"
+	defaultGatewayURL       = "http://ada-gateway.ada-system.svc:8080"
+	defaultRuntimeClassName = "gvisor"
+	defaultAccessMode       = "tty"
+	defaultCPU              = "2"
+	defaultMemory           = "4Gi"
+	defaultEphemeralStorage = "10Gi"
 )
 
 type Config struct {
@@ -31,8 +29,6 @@ type Config struct {
 	Harness          string          `json:"harness"`
 	Image            string          `json:"image"`
 	Namespace        string          `json:"namespace"`
-	SystemNamespace  string          `json:"systemNamespace"`
-	SigningKeySecret string          `json:"signingKeySecret"`
 	GatewayURL       string          `json:"gatewayURL"`
 	RuntimeClass     string          `json:"runtimeClass"`
 	CPU              string          `json:"cpu"`
@@ -47,15 +43,13 @@ func Defaults() Config {
 	return Config{
 		Access:           defaultAccessMode,
 		Image:            defaultBaseImage,
-		Namespace:        defaultWorkloadNamespace,
-		SystemNamespace:  defaultSystemNamespace,
-		SigningKeySecret: defaultSigningKeySecretName,
+		Namespace:        DefaultWorkloadsNamespace,
 		GatewayURL:       defaultGatewayURL,
 		RuntimeClass:     defaultRuntimeClassName,
 		CPU:              defaultCPU,
 		Memory:           defaultMemory,
 		EphemeralStorage: defaultEphemeralStorage,
-		TTL:              metav1.Duration{Duration: defaultTokenTTL},
+		TTL:              metav1.Duration{Duration: DefaultTokenTTL},
 	}
 }
 

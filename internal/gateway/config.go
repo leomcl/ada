@@ -6,11 +6,14 @@ import (
 	"strings"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/leomcl/ada/internal/sandbox"
 )
 
 const (
 	DefaultConfigPath           = "/etc/ada/gateway.yaml"
 	DefaultListenAddr           = "127.0.0.1:8080"
+	DefaultWorkloadsNamespace   = sandbox.DefaultWorkloadsNamespace
 	DefaultGitHubBaseURL        = "https://github.com"
 	DefaultGitHubAPIBaseURL     = "https://api.github.com"
 	DefaultCLIProxyBaseURL      = "http://127.0.0.1:8317"
@@ -20,10 +23,11 @@ const (
 )
 
 type Settings struct {
-	ListenAddr string           `json:"listenAddr"`
-	GitHub     GitHubSettings   `json:"github"`
-	CLIProxy   CLIProxySettings `json:"cliproxy"`
-	Providers  ProviderSettings `json:"providers"`
+	ListenAddr         string           `json:"listenAddr"`
+	WorkloadsNamespace string           `json:"workloadsNamespace"`
+	GitHub             GitHubSettings   `json:"github"`
+	CLIProxy           CLIProxySettings `json:"cliproxy"`
+	Providers          ProviderSettings `json:"providers"`
 }
 
 type GitHubSettings struct {
@@ -74,6 +78,7 @@ func LoadSettings(path string) (Settings, error) {
 
 func (s Settings) withDefaults() Settings {
 	s.ListenAddr = stringOrDefault(s.ListenAddr, DefaultListenAddr)
+	s.WorkloadsNamespace = stringOrDefault(s.WorkloadsNamespace, DefaultWorkloadsNamespace)
 	s.GitHub.BaseURL = stringOrDefault(s.GitHub.BaseURL, DefaultGitHubBaseURL)
 	s.GitHub.APIBaseURL = stringOrDefault(s.GitHub.APIBaseURL, DefaultGitHubAPIBaseURL)
 	s.CLIProxy.BaseURL = stringOrDefault(s.CLIProxy.BaseURL, DefaultCLIProxyBaseURL)

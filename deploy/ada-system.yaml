@@ -6,6 +6,48 @@ metadata:
     kubernetes.io/metadata.name: ada-system
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ada-gateway
+  namespace: ada-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ada-gateway-workloads
+  namespace: agent-sandbox-workloads
+rules:
+  - apiGroups:
+      - agents.x-k8s.io
+    resources:
+      - sandboxes
+    verbs:
+      - get
+      - list
+      - watch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ada-gateway-workloads
+  namespace: agent-sandbox-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ada-gateway-workloads
+subjects:
+  - kind: ServiceAccount
+    name: ada-gateway
+    namespace: ada-system
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: cliproxy-state
@@ -25,6 +67,7 @@ metadata:
 data:
   gateway.yaml: |
     listenAddr: ":8080"
+    workloadsNamespace: agent-sandbox-workloads
     cliproxy:
       enabled: true
       baseURL: http://127.0.0.1:8317
@@ -55,6 +98,7 @@ spec:
       labels:
         app.kubernetes.io/name: ada-gateway
     spec:
+      serviceAccountName: ada-gateway
       automountServiceAccountToken: false
       containers:
         - name: ada-gateway
@@ -102,9 +146,12 @@ spec:
               mountPath: /etc/ada/gateway.yaml
               subPath: gateway.yaml
               readOnly: true
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -173,6 +220,22 @@ spec:
         - name: gateway-config
           configMap:
             name: ada-gateway-config
+        - name: kube-api-access
+          projected:
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
         - name: cliproxy-config
           secret:
             secretName: ada-gateway-secrets

@@ -46,8 +46,6 @@ access: rex
 harness: claude
 image: ghcr.io/leomcl/ada-base:v1
 namespace: team-sandboxes
-systemNamespace: sys-ns
-signingKeySecret: custom-signing-key
 gatewayURL: http://custom-gw:8080/
 runtimeClass: kata
 cpu: "4"
@@ -68,7 +66,6 @@ tailscaleAuthKey: ignored-from-file
 	}
 	if cfg.Repo != "leomcl/ada" || cfg.Access != "rex" || cfg.Harness != "claude" ||
 		cfg.Image != "ghcr.io/leomcl/ada-base:v1" || cfg.Namespace != "team-sandboxes" ||
-		cfg.SystemNamespace != "sys-ns" || cfg.SigningKeySecret != "custom-signing-key" ||
 		cfg.RuntimeClass != "kata" || cfg.CPU != "4" || cfg.Memory != "8Gi" ||
 		cfg.EphemeralStorage != "20Gi" || !cfg.Spot || cfg.TTL.Duration != 6*time.Hour ||
 		cfg.TailscaleAuthKey != "" {

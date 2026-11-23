@@ -548,6 +548,7 @@ func TestLoadSettings(t *testing.T) {
 	validPath := filepath.Join(dir, "gateway.yaml")
 	validYAML := `
 listenAddr: ":8080"
+workloadsNamespace: team-workloads
 cliproxy:
   enabled: true
 providers:
@@ -562,8 +563,11 @@ providers:
 	if err != nil {
 		t.Fatalf("LoadSettings: %v", err)
 	}
-	if got.ListenAddr != ":8080" || !got.CLIProxy.Enabled || got.CLIProxy.BaseURL != DefaultCLIProxyBaseURL {
+	if got.ListenAddr != ":8080" || got.WorkloadsNamespace != "team-workloads" || !got.CLIProxy.Enabled || got.CLIProxy.BaseURL != DefaultCLIProxyBaseURL {
 		t.Fatalf("unexpected gateway settings: %+v", got)
+	}
+	if DefaultSettings().WorkloadsNamespace != DefaultWorkloadsNamespace {
+		t.Fatalf("expected default workloadsNamespace %q, got %q", DefaultWorkloadsNamespace, DefaultSettings().WorkloadsNamespace)
 	}
 	if got.Providers.OpenAI.UpstreamURL != "https://openrouter.ai/api" {
 		t.Fatalf("expected custom openai upstream, got %q", got.Providers.OpenAI.UpstreamURL)

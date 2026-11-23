@@ -14,16 +14,27 @@ import (
 )
 
 const (
-	managedByLabel         = "app.kubernetes.io/managed-by"
-	managedByValue         = "ada"
-	sandboxNameLabel       = "ada.io/sandbox"
-	repoAnnotation         = "ada.io/repo"
+	ManagedByLabel         = "app.kubernetes.io/managed-by"
+	ManagedByValue         = "ada"
+	ManagedBySelector      = ManagedByLabel + "=" + ManagedByValue
+	SandboxNameLabel       = "ada.io/sandbox"
+	TokenSecretKey         = "token"
+	TailscaleSecretKey     = "ts-authkey"
+	RepoAnnotation         = "ada.io/repo"
 	accessAnnotation       = "ada.io/access"
 	harnessAnnotation      = "ada.io/harness"
 	spotAnnotation         = "ada.io/spot"
 	podNameAnnotation      = "agents.x-k8s.io/pod-name"
 	gkeSpotNodeSelectorKey = "cloud.google.com/gke-spot"
 )
+
+func TokenSecretName(sandboxName string) string {
+	return sandboxName + "-token"
+}
+
+func TailscaleSecretName(sandboxName string) string {
+	return sandboxName + "-tailscale"
+}
 
 func PodName(sb *Sandbox) string {
 	if name := sb.Annotations[podNameAnnotation]; name != "" {
@@ -33,7 +44,7 @@ func PodName(sb *Sandbox) string {
 }
 
 func Repo(sb *Sandbox) string {
-	return sb.Annotations[repoAnnotation]
+	return sb.Annotations[RepoAnnotation]
 }
 
 func Harness(sb *Sandbox) string {
@@ -80,13 +91,13 @@ func sanitizeDNSLabel(raw string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-func buildSandbox(cfg Config, sandboxName, secretName string, expiresAt time.Time) *Sandbox {
+func buildSandbox(cfg Config, sandboxName string, expiresAt time.Time) *Sandbox {
 	labels := map[string]string{
-		managedByLabel:   managedByValue,
-		sandboxNameLabel: sandboxName,
+		ManagedByLabel:   ManagedByValue,
+		SandboxNameLabel: sandboxName,
 	}
 	annotations := map[string]string{
-		repoAnnotation:   cfg.Repo,
+		RepoAnnotation:   cfg.Repo,
 		accessAnnotation: cfg.Access,
 	}
 	if cfg.Harness != "" {
@@ -104,7 +115,7 @@ func buildSandbox(cfg Config, sandboxName, secretName string, expiresAt time.Tim
 				Name:       "sandbox",
 				Image:      cfg.Image,
 				WorkingDir: "/workspace",
-				Env:        buildEnv(cfg, sandboxName, secretName),
+				Env:        buildEnv(cfg, sandboxName),
 				Resources:  buildResources(cfg),
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: ptr.To(false),
@@ -146,8 +157,8 @@ func buildSandbox(cfg Config, sandboxName, secretName string, expiresAt time.Tim
 				PodTemplate: PodTemplate{
 					ObjectMeta: PodMetadata{
 						Labels: map[string]string{
-							managedByLabel:   managedByValue,
-							sandboxNameLabel: sandboxName,
+							ManagedByLabel:   ManagedByValue,
+							SandboxNameLabel: sandboxName,
 						},
 					},
 					Spec: podSpec,
@@ -162,8 +173,8 @@ func buildSandbox(cfg Config, sandboxName, secretName string, expiresAt time.Tim
 	}
 }
 
-func buildEnv(cfg Config, sandboxName, secretName string) []corev1.EnvVar {
-	secretEnv := func(envName, key string) corev1.EnvVar {
+func buildEnv(cfg Config, sandboxName string) []corev1.EnvVar {
+	secretEnv := func(envName, secretName, key string) corev1.EnvVar {
 		return corev1.EnvVar{
 			Name: envName,
 			ValueFrom: &corev1.EnvVarSource{
@@ -175,14 +186,15 @@ func buildEnv(cfg Config, sandboxName, secretName string) []corev1.EnvVar {
 		}
 	}
 
+	tokenSecret := TokenSecretName(sandboxName)
 	env := []corev1.EnvVar{
-		secretEnv("ADA_TOKEN", "token"),
-		secretEnv("OPENAI_API_KEY", "token"),
-		secretEnv("ANTHROPIC_AUTH_TOKEN", "token"),
-		secretEnv("GEMINI_API_KEY", "token"),
+		secretEnv("ADA_TOKEN", tokenSecret, TokenSecretKey),
+		secretEnv("OPENAI_API_KEY", tokenSecret, TokenSecretKey),
+		secretEnv("ANTHROPIC_AUTH_TOKEN", tokenSecret, TokenSecretKey),
+		secretEnv("GEMINI_API_KEY", tokenSecret, TokenSecretKey),
 	}
 	if cfg.TailscaleAuthKey != "" {
-		env = append(env, secretEnv("TS_AUTHKEY", "ts-authkey"))
+		env = append(env, secretEnv("TS_AUTHKEY", TailscaleSecretName(sandboxName), TailscaleSecretKey))
 	}
 
 	env = append(env,

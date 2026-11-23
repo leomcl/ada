@@ -21,8 +21,6 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
-
-	"github.com/leomcl/ada/internal/token"
 )
 
 func newTestDynamicClient(t *testing.T) *dynamicfake.FakeDynamicClient {
@@ -57,24 +55,6 @@ func newTestDynamicClient(t *testing.T) *dynamicfake.FakeDynamicClient {
 
 func newTestClient(t *testing.T, objects ...runtime.Object) (*Client, *kubefake.Clientset, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
-	hasDefaultSecret := false
-	for _, obj := range objects {
-		if sec, ok := obj.(*corev1.Secret); ok && sec.Namespace == defaultSystemNamespace && sec.Name == defaultSigningKeySecretName {
-			hasDefaultSecret = true
-			break
-		}
-	}
-	if !hasDefaultSecret {
-		objects = append(objects, &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      defaultSigningKeySecretName,
-				Namespace: defaultSystemNamespace,
-			},
-			Data: map[string][]byte{
-				signingKeySecretKey: []byte("cluster-signing-secret-key\n"),
-			},
-		})
-	}
 	kubeClient := kubefake.NewSimpleClientset(objects...)
 	dynamicClient := newTestDynamicClient(t)
 	return &Client{kube: kubeClient, dynamic: dynamicClient}, kubeClient, dynamicClient
@@ -129,9 +109,8 @@ func TestGenerateName(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxAndSecret(t *testing.T) {
+func TestCreateSandboxAndTailscaleSecret(t *testing.T) {
 	ctx := context.Background()
-	signingKey := []byte("cluster-signing-secret-key")
 	client, kubeClient, _ := newTestClient(t)
 
 	cfg := Defaults()
@@ -149,28 +128,22 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 	if sb.Name == "" {
 		t.Fatal("expected generated sandbox name")
 	}
-	secretName := sb.Name + "-token"
+	tokenSecretName := TokenSecretName(sb.Name)
+	tailscaleSecretName := TailscaleSecretName(sb.Name)
 
-	secret, err := kubeClient.CoreV1().Secrets(defaultWorkloadNamespace).Get(ctx, secretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get created secret: %v", err)
+	if _, err := kubeClient.CoreV1().Secrets(DefaultWorkloadsNamespace).Get(ctx, tokenSecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected CLI not to create %s, got err=%v", tokenSecretName, err)
 	}
-	if gotTS := string(secret.Data["ts-authkey"]); gotTS != "tskey-ephemeral-1" {
+
+	secret, err := kubeClient.CoreV1().Secrets(DefaultWorkloadsNamespace).Get(ctx, tailscaleSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get created tailscale secret: %v", err)
+	}
+	if gotTS := string(secret.Data[TailscaleSecretKey]); gotTS != "tskey-ephemeral-1" {
 		t.Fatalf("secret ts-authkey: got %q", gotTS)
 	}
-
-	claims, err := token.VerifySandboxToken(string(secret.Data["token"]), signingKey, time.Now())
-	if err != nil {
-		t.Fatalf("VerifySandboxToken: %v", err)
-	}
-	if claims.Repo != "leomcl/better-branch" {
-		t.Fatalf("claims.Repo: got %q, want leomcl/better-branch", claims.Repo)
-	}
-	if claims.JTI != sb.Name {
-		t.Fatalf("claims.JTI: got %q, want %q", claims.JTI, sb.Name)
-	}
-	if claims.ExpiresAt-claims.IssuedAt != int64((12 * time.Hour).Seconds()) {
-		t.Fatalf("unexpected token TTL: %d", claims.ExpiresAt-claims.IssuedAt)
+	if _, hasToken := secret.Data[TokenSecretKey]; hasToken {
+		t.Fatal("tailscale secret must not contain sandbox token")
 	}
 
 	if len(secret.OwnerReferences) != 1 {
@@ -180,8 +153,8 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 	if owner.APIVersion != "agents.x-k8s.io/v1beta1" || owner.Kind != "Sandbox" || owner.Name != sb.Name || owner.UID != sb.UID {
 		t.Fatalf("unexpected ownerReference: %+v (sandbox UID=%s)", owner, sb.UID)
 	}
-	if owner.Controller != nil {
-		t.Fatalf("expected OwnerReference.Controller to be nil, got %v", *owner.Controller)
+	if owner.Controller != nil || owner.BlockOwnerDeletion != nil {
+		t.Fatalf("expected Controller and BlockOwnerDeletion to be nil, got %+v", owner)
 	}
 
 	podSpec := sb.Spec.PodTemplate.Spec
@@ -245,13 +218,14 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 			t.Fatalf("env %s must not embed inline token value", secretEnvName)
 		}
 		if ev.ValueFrom == nil || ev.ValueFrom.SecretKeyRef == nil ||
-			ev.ValueFrom.SecretKeyRef.Name != secretName || ev.ValueFrom.SecretKeyRef.Key != "token" {
+			ev.ValueFrom.SecretKeyRef.Name != tokenSecretName || ev.ValueFrom.SecretKeyRef.Key != TokenSecretKey {
 			t.Fatalf("env %s has unexpected secretKeyRef: %+v", secretEnvName, ev.ValueFrom)
 		}
 	}
 
 	tsEnv := envMap["TS_AUTHKEY"]
-	if tsEnv.ValueFrom == nil || tsEnv.ValueFrom.SecretKeyRef == nil || tsEnv.ValueFrom.SecretKeyRef.Key != "ts-authkey" {
+	if tsEnv.ValueFrom == nil || tsEnv.ValueFrom.SecretKeyRef == nil ||
+		tsEnv.ValueFrom.SecretKeyRef.Name != tailscaleSecretName || tsEnv.ValueFrom.SecretKeyRef.Key != TailscaleSecretKey {
 		t.Fatalf("unexpected TS_AUTHKEY env: %+v", tsEnv)
 	}
 
@@ -273,6 +247,33 @@ func TestCreateSandboxAndSecret(t *testing.T) {
 	}
 }
 
+func TestCreateWithoutTailscaleCreatesNoSecrets(t *testing.T) {
+	ctx := context.Background()
+	client, kubeClient, _ := newTestClient(t)
+
+	cfg := Defaults()
+	cfg.Repo = "leomcl/ada"
+	cfg.SandboxName = "ada-no-ts"
+
+	sb, err := client.Create(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	secrets, err := kubeClient.CoreV1().Secrets(DefaultWorkloadsNamespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("List secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("expected 0 secrets created by CLI, got %d", len(secrets.Items))
+	}
+	for _, ev := range sb.Spec.PodTemplate.Spec.Containers[0].Env {
+		if ev.Name == "TS_AUTHKEY" {
+			t.Fatal("TS_AUTHKEY must not be set when TailscaleAuthKey is empty")
+		}
+	}
+}
+
 func TestCreateDoesNotLeaveSecretOnSandboxError(t *testing.T) {
 	ctx := context.Background()
 	client, kubeClient, dynamicClient := newTestClient(t)
@@ -283,18 +284,19 @@ func TestCreateDoesNotLeaveSecretOnSandboxError(t *testing.T) {
 	cfg := Defaults()
 	cfg.Repo = "leomcl/ada"
 	cfg.SandboxName = "ada-fail"
+	cfg.TailscaleAuthKey = "tskey-1"
 
 	if _, err := client.Create(ctx, cfg); err == nil {
 		t.Fatal("expected error when sandbox creation fails")
 	}
 
-	_, getErr := kubeClient.CoreV1().Secrets(defaultWorkloadNamespace).Get(ctx, "ada-fail-token", metav1.GetOptions{})
+	_, getErr := kubeClient.CoreV1().Secrets(DefaultWorkloadsNamespace).Get(ctx, TailscaleSecretName("ada-fail"), metav1.GetOptions{})
 	if !apierrors.IsNotFound(getErr) {
 		t.Fatalf("expected no secret to be created, got err=%v", getErr)
 	}
 }
 
-func TestCreateCleansUpSandboxOnSecretError(t *testing.T) {
+func TestCreateCleansUpSandboxOnTailscaleSecretError(t *testing.T) {
 	ctx := context.Background()
 	client, kubeClient, dynamicClient := newTestClient(t)
 	kubeClient.PrependReactor("create", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -304,12 +306,13 @@ func TestCreateCleansUpSandboxOnSecretError(t *testing.T) {
 	cfg := Defaults()
 	cfg.Repo = "leomcl/ada"
 	cfg.SandboxName = "ada-secret-fail"
+	cfg.TailscaleAuthKey = "tskey-1"
 
 	if _, err := client.Create(ctx, cfg); err == nil {
 		t.Fatal("expected error when secret creation fails")
 	}
 
-	_, getErr := dynamicClient.Resource(SandboxGVR).Namespace(defaultWorkloadNamespace).Get(ctx, "ada-secret-fail", metav1.GetOptions{})
+	_, getErr := dynamicClient.Resource(SandboxGVR).Namespace(DefaultWorkloadsNamespace).Get(ctx, "ada-secret-fail", metav1.GetOptions{})
 	if !apierrors.IsNotFound(getErr) {
 		t.Fatalf("expected sandbox to be cleaned up, got err=%v", getErr)
 	}
@@ -335,15 +338,15 @@ func TestListAndDeleteSandboxes(t *testing.T) {
 			"kind":       SandboxKind,
 			"metadata": map[string]any{
 				"name":      "not-managed-by-ada",
-				"namespace": defaultWorkloadNamespace,
+				"namespace": DefaultWorkloadsNamespace,
 			},
 		},
 	}
-	if _, err := dynamicClient.Resource(SandboxGVR).Namespace(defaultWorkloadNamespace).Create(ctx, unrelated, metav1.CreateOptions{}); err != nil {
+	if _, err := dynamicClient.Resource(SandboxGVR).Namespace(DefaultWorkloadsNamespace).Create(ctx, unrelated, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create unrelated sandbox: %v", err)
 	}
 
-	items, err := client.List(ctx, defaultWorkloadNamespace)
+	items, err := client.List(ctx, DefaultWorkloadsNamespace)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -354,11 +357,11 @@ func TestListAndDeleteSandboxes(t *testing.T) {
 		t.Fatalf("unexpected summary: %+v", items[0])
 	}
 
-	if err := client.Delete(ctx, defaultWorkloadNamespace, "ada-one"); err != nil {
+	if err := client.Delete(ctx, DefaultWorkloadsNamespace, "ada-one"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	itemsAfter, err := client.List(ctx, defaultWorkloadNamespace)
+	itemsAfter, err := client.List(ctx, DefaultWorkloadsNamespace)
 	if err != nil {
 		t.Fatalf("List after delete: %v", err)
 	}
@@ -380,13 +383,13 @@ func TestWaitReady(t *testing.T) {
 	}
 
 	setStatusCondition := func(status metav1.ConditionStatus, reason, msg string) {
-		u, err := dynamicClient.Resource(SandboxGVR).Namespace(defaultWorkloadNamespace).Get(ctx, "ada-wait", metav1.GetOptions{})
+		u, err := dynamicClient.Resource(SandboxGVR).Namespace(DefaultWorkloadsNamespace).Get(ctx, "ada-wait", metav1.GetOptions{})
 		if err != nil {
 			t.Fatalf("Get sandbox: %v", err)
 		}
-		sb, err := fromUnstructured(u)
+		sb, err := FromUnstructured(u)
 		if err != nil {
-			t.Fatalf("fromUnstructured: %v", err)
+			t.Fatalf("FromUnstructured: %v", err)
 		}
 		sb.Status.Conditions = []metav1.Condition{
 			{
@@ -396,11 +399,11 @@ func TestWaitReady(t *testing.T) {
 				Message: msg,
 			},
 		}
-		updated, err := toUnstructured(sb)
+		updated, err := ToUnstructured(sb)
 		if err != nil {
-			t.Fatalf("toUnstructured: %v", err)
+			t.Fatalf("ToUnstructured: %v", err)
 		}
-		if _, err := dynamicClient.Resource(SandboxGVR).Namespace(defaultWorkloadNamespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		if _, err := dynamicClient.Resource(SandboxGVR).Namespace(DefaultWorkloadsNamespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
 			t.Fatalf("UpdateStatus: %v", err)
 		}
 	}
@@ -409,7 +412,7 @@ func TestWaitReady(t *testing.T) {
 
 	readyCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	sb, err := client.WaitReady(readyCtx, defaultWorkloadNamespace, "ada-wait")
+	sb, err := client.WaitReady(readyCtx, DefaultWorkloadsNamespace, "ada-wait")
 	if err != nil {
 		t.Fatalf("WaitReady(ready): %v", err)
 	}
@@ -420,7 +423,7 @@ func TestWaitReady(t *testing.T) {
 	setStatusCondition(metav1.ConditionFalse, SandboxReasonPodFailed, "OOMKilled")
 	failCtx, cancelFail := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelFail()
-	if _, err := client.WaitReady(failCtx, defaultWorkloadNamespace, "ada-wait"); err == nil || !strings.Contains(err.Error(), "PodFailed") {
+	if _, err := client.WaitReady(failCtx, DefaultWorkloadsNamespace, "ada-wait"); err == nil || !strings.Contains(err.Error(), "PodFailed") {
 		t.Fatalf("expected terminal PodFailed error, got %v", err)
 	}
 }
